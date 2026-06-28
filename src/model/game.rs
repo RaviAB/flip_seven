@@ -1,7 +1,4 @@
-use super::{
-    BonusCard, Card, Deck, Player, PlayerId, PlayerStatus, round_score_for_cards,
-    strategy::{AiDecision, DecisionContext},
-};
+use super::{BonusCard, Card, Deck, Player, PlayerId, PlayerStatus, round_score_for_cards};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpecialAction {
@@ -15,6 +12,55 @@ pub struct PendingAction {
     source_player_id: PlayerId,
     target_player_id: Option<PlayerId>,
     remaining_draws: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpecialHandling {
+    ResolveNow,
+    Queue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UndoTracking {
+    Enabled,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlipSevenBonus {
+    No,
+    Yes,
+}
+
+impl FlipSevenBonus {
+    fn applies(self) -> bool {
+        self == Self::Yes
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardApplication {
+    Number,
+    Bonus,
+    SecondChance,
+    UsedSecondChance,
+    Busted,
+    NeedsTarget(SpecialAction),
+    QueuedSpecial(SpecialAction),
+}
+
+impl CardApplication {
+    fn note(self) -> Option<String> {
+        match self {
+            Self::UsedSecondChance => Some("Second Chance was used.".to_owned()),
+            Self::Busted => Some("Player busted.".to_owned()),
+            Self::QueuedSpecial(action) => Some(format!(
+                "Queued {} for later resolution.",
+                special_action_label(action)
+            )),
+            Self::Number | Self::Bonus | Self::SecondChance | Self::NeedsTarget(_) => None,
+        }
+    }
 }
 
 impl PendingAction {
@@ -253,6 +299,7 @@ pub struct GameState {
     round_over: bool,
     flip_seven_player_id: Option<PlayerId>,
     history: Vec<GameSnapshot>,
+    undo_tracking: UndoTracking,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,6 +366,7 @@ impl GameState {
             round_over: false,
             flip_seven_player_id: None,
             history: Vec::new(),
+            undo_tracking: UndoTracking::Enabled,
         }
     }
 
@@ -326,6 +374,7 @@ impl GameState {
         self.save_snapshot();
         *self = Self {
             history: std::mem::take(&mut self.history),
+            undo_tracking: UndoTracking::Enabled,
             ..Self::new(player_count)
         };
     }
@@ -398,14 +447,14 @@ impl GameState {
             return DealOutcome::DeckEmpty;
         }
 
-        self.history.push(snapshot);
+        self.push_snapshot(snapshot);
         self.current_player_index = player_index;
         self.record_pre_draw_telemetry(player_index);
         let Some(card) = self.deck.draw() else {
             return DealOutcome::DeckEmpty;
         };
 
-        self.apply_card_to_current_player(card, true)
+        self.apply_card_to_current_player(card)
     }
 
     pub fn deal_selected_card(&mut self, card: Card) -> DealOutcome {
@@ -442,14 +491,14 @@ impl GameState {
             return DealOutcome::SelectedCardUnavailable;
         }
 
-        self.history.push(snapshot);
+        self.push_snapshot(snapshot);
         self.current_player_index = player_index;
         self.record_pre_draw_telemetry(player_index);
         let Some(card) = self.deck.draw_selected(card) else {
             return DealOutcome::SelectedCardUnavailable;
         };
 
-        self.apply_card_to_current_player(card, true)
+        self.apply_card_to_current_player(card)
     }
 
     fn deal_selected_flip_three_card(
@@ -486,7 +535,9 @@ impl GameState {
         };
 
         let target_player_name = self.players[target_index].name().to_owned();
-        let mut notes = vec![self.apply_card_to_player_index(target_index, card, true)];
+        let application =
+            self.apply_card_to_player_index(target_index, card, SpecialHandling::Queue);
+        let mut notes = application.note().into_iter().collect::<Vec<_>>();
 
         if self.players[target_index].has_flip_seven() {
             self.flip_seven_player_id = Some(target_player_id);
@@ -546,7 +597,7 @@ impl GameState {
         self.current_player_index = player_index;
         let player_id = self.players[player_index].id();
         let player_name = self.players[player_index].name().to_owned();
-        self.finish_player(player_index, PlayerStatus::Stayed, false);
+        self.finish_player(player_index, PlayerStatus::Stayed, FlipSevenBonus::No);
         self.advance_to_next_active_player_after(player_id);
 
         if self.no_active_players() {
@@ -582,7 +633,7 @@ impl GameState {
         let mut notes = Vec::new();
         match pending_action.action {
             SpecialAction::Freeze => {
-                self.finish_player(target_index, PlayerStatus::Frozen, false);
+                self.finish_player(target_index, PlayerStatus::Frozen, FlipSevenBonus::No);
                 notes.push(format!("{} is frozen.", self.players[target_index].name()));
             }
             SpecialAction::FlipThree => {
@@ -670,71 +721,6 @@ impl GameState {
             .and_then(|index| self.players.get(index))
     }
 
-    pub fn current_ai_player_id(&self) -> Option<PlayerId> {
-        if self.round_over {
-            return None;
-        }
-
-        if let Some(pending_action) = &self.pending_action {
-            return pending_action
-                .needs_target()
-                .then_some(pending_action.source_player_id());
-        }
-
-        self.current_player()
-            .filter(|player| player.is_active_in_round())
-            .map(Player::id)
-    }
-
-    pub fn decision_context(&self) -> Option<DecisionContext> {
-        let player_id = self.current_ai_player_id()?;
-        let draw_odds = self.draw_odds_for_player(player_id);
-
-        Some(DecisionContext {
-            player_id,
-            pending_action: self.pending_action.clone(),
-            legal_targets: self.legal_active_targets(),
-            draw_odds,
-        })
-    }
-
-    pub fn legal_ai_decisions(&self) -> Vec<AiDecision> {
-        if self.round_over {
-            return Vec::new();
-        }
-
-        if let Some(pending_action) = &self.pending_action {
-            if pending_action.needs_target() {
-                return self
-                    .legal_active_targets()
-                    .into_iter()
-                    .map(AiDecision::ChooseTarget)
-                    .collect();
-            }
-
-            return Vec::new();
-        }
-
-        if self
-            .current_player()
-            .is_some_and(Player::is_active_in_round)
-        {
-            vec![AiDecision::Stay, AiDecision::Draw]
-        } else {
-            Vec::new()
-        }
-    }
-
-    pub fn apply_ai_decision(&mut self, decision: AiDecision) -> DealOutcome {
-        match decision {
-            AiDecision::Stay => self.stay_current_player(),
-            AiDecision::ChooseTarget(player_id) => {
-                self.resolve_pending_action(ActionChoice::Player(player_id))
-            }
-            AiDecision::Draw => DealOutcome::SelectedCardUnavailable,
-        }
-    }
-
     pub fn legal_active_targets(&self) -> Vec<PlayerId> {
         self.players
             .iter()
@@ -766,13 +752,6 @@ impl GameState {
             .map(|score| target_score.saturating_sub(score.total_score))
     }
 
-    pub fn clone_for_simulation(&self) -> Self {
-        Self {
-            history: Vec::new(),
-            ..self.clone()
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn replace_deck_for_test(&mut self, deck: Deck) {
         self.deck = deck;
@@ -794,6 +773,11 @@ impl GameState {
         if let Some(index) = self.player_index(player_id) {
             self.players[index].bust();
         }
+    }
+
+    pub(crate) fn disable_undo_tracking_for_replay(&mut self) {
+        self.undo_tracking = UndoTracking::Disabled;
+        self.history.clear();
     }
 
     fn draw_odds_for_player_index(&self, player_index: usize) -> Option<DrawOdds> {
@@ -906,67 +890,50 @@ impl GameState {
         self.deck.next_draw_pool_counts()
     }
 
-    fn apply_card_to_current_player(
-        &mut self,
-        card: Card,
-        advance_after_card: bool,
-    ) -> DealOutcome {
+    fn apply_card_to_current_player(&mut self, card: Card) -> DealOutcome {
         let player_index = self.current_player_index;
         let player_id = self.players[player_index].id();
         let player_name = self.players[player_index].name().to_owned();
 
-        match self
-            .apply_card_to_player_index(player_index, card, false)
-            .as_str()
-        {
-            "number" => {
+        match self.apply_card_to_player_index(player_index, card, SpecialHandling::ResolveNow) {
+            CardApplication::Number => {
                 if self.players[player_index].has_flip_seven() {
                     self.flip_seven_player_id = Some(player_id);
                     return self.end_round(format!("{player_name} hit Flip 7."));
                 }
 
-                if advance_after_card {
-                    self.advance_to_next_active_player_after(player_id);
-                }
+                self.advance_to_next_active_player_after(player_id);
                 DealOutcome::DealtNumber {
                     player_id,
                     player_name,
                     card,
                 }
             }
-            "bonus" => {
-                if advance_after_card {
-                    self.advance_to_next_active_player_after(player_id);
-                }
+            CardApplication::Bonus => {
+                self.advance_to_next_active_player_after(player_id);
                 DealOutcome::Bonus {
                     player_id,
                     player_name,
                     card,
                 }
             }
-            "second" => {
-                if advance_after_card {
-                    self.advance_to_next_active_player_after(player_id);
-                }
+            CardApplication::SecondChance => {
+                self.advance_to_next_active_player_after(player_id);
                 DealOutcome::SecondChance {
                     player_id,
                     player_name,
                 }
             }
-            "used_second" => {
-                if advance_after_card {
-                    self.advance_to_next_active_player_after(player_id);
-                }
+            CardApplication::UsedSecondChance => {
+                self.advance_to_next_active_player_after(player_id);
                 DealOutcome::UsedSecondChance {
                     player_id,
                     player_name,
                     duplicate: card,
                 }
             }
-            "busted" => {
-                if advance_after_card {
-                    self.advance_to_next_active_player_after(player_id);
-                }
+            CardApplication::Busted => {
+                self.advance_to_next_active_player_after(player_id);
                 let outcome = DealOutcome::Busted {
                     player_id,
                     player_name,
@@ -979,17 +946,12 @@ impl GameState {
                     outcome
                 }
             }
-            "flip_three" => DealOutcome::SpecialNeedsTarget {
-                action: SpecialAction::FlipThree,
+            CardApplication::NeedsTarget(action) => DealOutcome::SpecialNeedsTarget {
+                action,
                 source_player_id: player_id,
                 source_player_name: player_name,
             },
-            "freeze" => DealOutcome::SpecialNeedsTarget {
-                action: SpecialAction::Freeze,
-                source_player_id: player_id,
-                source_player_name: player_name,
-            },
-            _ => DealOutcome::DeckEmpty,
+            CardApplication::QueuedSpecial(_) => DealOutcome::DeckEmpty,
         }
     }
 
@@ -997,31 +959,31 @@ impl GameState {
         &mut self,
         player_index: usize,
         card: Card,
-        queue_specials: bool,
-    ) -> String {
+        special_handling: SpecialHandling,
+    ) -> CardApplication {
         match card {
             Card::Number(value) => {
                 if self.players[player_index].has_number(value) {
                     self.deck.discard(card);
                     if self.players[player_index].use_second_chance() {
                         self.deck.discard(Card::SecondChance);
-                        "used_second".to_owned()
+                        CardApplication::UsedSecondChance
                     } else {
-                        self.finish_player(player_index, PlayerStatus::Busted, false);
-                        "busted".to_owned()
+                        self.finish_player(player_index, PlayerStatus::Busted, FlipSevenBonus::No);
+                        CardApplication::Busted
                     }
                 } else {
                     self.players[player_index].receive_card(card);
-                    "number".to_owned()
+                    CardApplication::Number
                 }
             }
             Card::Bonus(_) => {
                 self.players[player_index].receive_card(card);
-                "bonus".to_owned()
+                CardApplication::Bonus
             }
             Card::SecondChance => {
                 self.players[player_index].receive_card(card);
-                "second".to_owned()
+                CardApplication::SecondChance
             }
             Card::FlipThree => {
                 self.deck.discard(card);
@@ -1031,12 +993,12 @@ impl GameState {
                     target_player_id: None,
                     remaining_draws: 0,
                 };
-                if queue_specials {
+                if special_handling == SpecialHandling::Queue {
                     self.queued_actions.push(action);
-                    "queued Flip Three for later resolution".to_owned()
+                    CardApplication::QueuedSpecial(SpecialAction::FlipThree)
                 } else {
                     self.pending_action = Some(action);
-                    "flip_three".to_owned()
+                    CardApplication::NeedsTarget(SpecialAction::FlipThree)
                 }
             }
             Card::Freeze => {
@@ -1047,12 +1009,12 @@ impl GameState {
                     target_player_id: None,
                     remaining_draws: 0,
                 };
-                if queue_specials {
+                if special_handling == SpecialHandling::Queue {
                     self.queued_actions.push(action);
-                    "queued Freeze for later resolution".to_owned()
+                    CardApplication::QueuedSpecial(SpecialAction::Freeze)
                 } else {
                     self.pending_action = Some(action);
-                    "freeze".to_owned()
+                    CardApplication::NeedsTarget(SpecialAction::Freeze)
                 }
             }
         }
@@ -1084,7 +1046,15 @@ impl GameState {
                     PlayerStatus::Busted => RoundOutcome::Busted,
                 }
             };
-            self.bank_player_score(player_index, flip_seven_bonus, outcome);
+            self.bank_player_score(
+                player_index,
+                if flip_seven_bonus {
+                    FlipSevenBonus::Yes
+                } else {
+                    FlipSevenBonus::No
+                },
+                outcome,
+            );
         }
 
         for score in &mut self.score_board {
@@ -1125,7 +1095,12 @@ impl GameState {
         DealOutcome::RoundEnded { reason }
     }
 
-    fn finish_player(&mut self, player_index: usize, status: PlayerStatus, flip_seven_bonus: bool) {
+    fn finish_player(
+        &mut self,
+        player_index: usize,
+        status: PlayerStatus,
+        flip_seven_bonus: FlipSevenBonus,
+    ) {
         let outcome = match status {
             PlayerStatus::Active => RoundOutcome::RoundEndedActive,
             PlayerStatus::Stayed => RoundOutcome::Stayed,
@@ -1144,11 +1119,11 @@ impl GameState {
     fn bank_player_score(
         &mut self,
         player_index: usize,
-        flip_seven_bonus: bool,
+        flip_seven_bonus: FlipSevenBonus,
         outcome: RoundOutcome,
     ) {
         let player_id = self.players[player_index].id();
-        let round_score = self.players[player_index].round_score(flip_seven_bonus);
+        let round_score = self.players[player_index].round_score(flip_seven_bonus.applies());
         let discarded = self.players[player_index].drain_hand();
         self.deck.discard_many(discarded);
 
@@ -1207,7 +1182,15 @@ impl GameState {
     }
 
     fn save_snapshot(&mut self) {
-        self.history.push(self.snapshot());
+        if self.undo_tracking == UndoTracking::Enabled {
+            self.history.push(self.snapshot());
+        }
+    }
+
+    fn push_snapshot(&mut self, snapshot: GameSnapshot) {
+        if self.undo_tracking == UndoTracking::Enabled {
+            self.history.push(snapshot);
+        }
     }
 
     fn snapshot(&self) -> GameSnapshot {
@@ -1291,6 +1274,13 @@ fn score_after_one_draw(player: &Player, card: Card) -> u32 {
             round_score_for_cards(&cards, false)
         }
         Card::SecondChance | Card::FlipThree | Card::Freeze => player.round_score(false),
+    }
+}
+
+fn special_action_label(action: SpecialAction) -> &'static str {
+    match action {
+        SpecialAction::FlipThree => "Flip Three",
+        SpecialAction::Freeze => "Freeze",
     }
 }
 
