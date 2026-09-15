@@ -18,6 +18,7 @@ enum OutputFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Preset {
     HumanSweep,
+    MaxWinStaticCalibration,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -106,6 +107,20 @@ fn main() -> ExitCode {
         settings.player_count = 2;
         settings.strategies = human_sweep_strategy_kinds();
         settings.mirrored_seating = true;
+    } else if preset == Some(Preset::MaxWinStaticCalibration) {
+        settings.player_count = 4;
+        settings.strategies = vec![
+            StrategyKind::MaxWinStatic,
+            StrategyKind::MaxRoundEv,
+            StrategyKind::Balanced,
+            StrategyKind::Aggressive,
+            StrategyKind::MaxWinProbability,
+            StrategyKind::StayAtScore(27),
+            StrategyKind::StayAtScore(28),
+            StrategyKind::StayAtScore(29),
+            StrategyKind::StayAtScore(25),
+        ];
+        settings.mirrored_seating = true;
     }
 
     let started = Instant::now();
@@ -172,6 +187,7 @@ fn parse_format(value: &str) -> Option<OutputFormat> {
 fn parse_preset(value: &str) -> Option<Preset> {
     match value {
         "human-sweep" => Some(Preset::HumanSweep),
+        "max-win-static-calibration" => Some(Preset::MaxWinStaticCalibration),
         _ => None,
     }
 }
@@ -193,7 +209,7 @@ Options:
   --rollouts <n>           Alias for --matches
   --players <n>            Player count
   --strategies <list>      Comma-separated strategies. Available: {strategies}
-  --preset <human-sweep>   Run a named benchmark preset
+  --preset <name>          Run a named benchmark preset: human-sweep, max-win-static-calibration
   --decision-rollouts <n>  Rollouts used for each rollout-backed decision
   --seed <n>               RNG seed
   --target-score <n>       Score needed to win

@@ -12,6 +12,7 @@ const MAX_PLAYERS: usize = 18;
 
 pub struct FlipSevenApp {
     selected_player_count: usize,
+    player_count_input: String,
     game: GameState,
     status: String,
     show_deck_details: bool,
@@ -28,6 +29,7 @@ impl Default for FlipSevenApp {
 
         Self {
             selected_player_count,
+            player_count_input: selected_player_count.to_string(),
             game: GameState::new(selected_player_count),
             status: "Ready to deal.".to_owned(),
             show_deck_details: false,
@@ -103,12 +105,7 @@ impl FlipSevenApp {
     fn render_controls(&mut self, ui: &mut egui::Ui) {
         neutral_panel_frame().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label("Players");
-                ui.add(
-                    egui::DragValue::new(&mut self.selected_player_count)
-                        .range(MIN_PLAYERS..=MAX_PLAYERS)
-                        .speed(1.0),
-                );
+                self.render_player_count_control(ui);
 
                 let action_in_progress = self.game.pending_action().is_some();
                 if ui
@@ -207,6 +204,73 @@ impl FlipSevenApp {
 
             ui.label(&self.status);
         });
+    }
+
+    fn render_player_count_control(&mut self, ui: &mut egui::Ui) {
+        ui.label("Players");
+        if ui
+            .add_enabled(
+                self.selected_player_count > MIN_PLAYERS,
+                egui::Button::new("-"),
+            )
+            .on_hover_text("Decrease player count")
+            .clicked()
+        {
+            self.selected_player_count -= 1;
+            self.player_count_input = self.selected_player_count.to_string();
+        }
+
+        let count_response = ui.add(
+            egui::TextEdit::singleline(&mut self.player_count_input)
+                .desired_width(44.0)
+                .char_limit(MAX_PLAYERS.to_string().len()),
+        );
+        if count_response.changed() {
+            let digits = self
+                .player_count_input
+                .chars()
+                .filter(char::is_ascii_digit)
+                .collect::<String>();
+            if digits != self.player_count_input {
+                self.player_count_input = digits;
+            }
+            if let Ok(value) = self.player_count_input.parse::<usize>() {
+                self.selected_player_count = value.clamp(MIN_PLAYERS, MAX_PLAYERS);
+            }
+        }
+        if count_response.lost_focus() {
+            self.normalize_player_count_input();
+        }
+        count_response.on_hover_text("Type a player count");
+
+        if ui
+            .add_enabled(
+                self.selected_player_count < MAX_PLAYERS,
+                egui::Button::new("+"),
+            )
+            .on_hover_text("Increase player count")
+            .clicked()
+        {
+            self.selected_player_count += 1;
+            self.player_count_input = self.selected_player_count.to_string();
+        }
+
+        let active_player_count = self.game.players().len();
+        let player_count_changed = self.selected_player_count != active_player_count;
+        if ui
+            .add_enabled(player_count_changed, egui::Button::new("Apply"))
+            .on_hover_text("Reset the game with this player count")
+            .clicked()
+        {
+            self.normalize_player_count_input();
+            self.reset_game();
+        }
+        if player_count_changed {
+            ui.colored_label(
+                egui::Color32::from_rgb(245, 184, 86),
+                format!("{active_player_count} active"),
+            );
+        }
     }
 
     fn render_manual_deal_panel(&mut self, ui: &mut egui::Ui) {
@@ -505,6 +569,7 @@ impl FlipSevenApp {
     }
 
     fn reset_game(&mut self) {
+        self.normalize_player_count_input();
         self.game.reset(self.selected_player_count);
         self.status = format!(
             "Reset for {} player{}.",
@@ -519,6 +584,10 @@ impl FlipSevenApp {
 
     fn undo(&mut self) {
         let outcome = self.game.undo();
+        if matches!(outcome, DealOutcome::UndoApplied) {
+            self.selected_player_count = self.game.players().len();
+            self.player_count_input = self.selected_player_count.to_string();
+        }
         self.status = status_for_outcome(outcome);
     }
 
@@ -532,6 +601,13 @@ impl FlipSevenApp {
             .game
             .resolve_pending_action(ActionChoice::Player(player_id));
         self.status = status_for_outcome(outcome);
+    }
+
+    fn normalize_player_count_input(&mut self) {
+        if let Ok(value) = self.player_count_input.parse::<usize>() {
+            self.selected_player_count = value.clamp(MIN_PLAYERS, MAX_PLAYERS);
+        }
+        self.player_count_input = self.selected_player_count.to_string();
     }
 }
 
