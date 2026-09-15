@@ -1,0 +1,13 @@
+[build]
+target = "index.html"
+dist = "dist"
+public_url = "./"
+locked = true
+
+[watch]
+ignore = ["dist"]
+
+[[hooks]]
+stage = "post_build"
+command = "node"
+command_arguments = ["scripts/prepare-web.mjs"]

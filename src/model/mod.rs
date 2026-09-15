@@ -2,6 +2,7 @@ pub mod card;
 pub mod deck;
 pub mod game;
 pub mod player;
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
 pub mod strategy;
 
 pub use card::{BonusCard, Card};
@@ -11,6 +12,7 @@ pub use game::{
     PendingAction, PlayerScore, RoundOutcome, RoundScore, SpecialAction,
 };
 pub use player::{Player, PlayerId, PlayerStatus, ScoreBreakdown, round_score_for_cards};
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
 pub use strategy::{
     AiDecision, DecisionContext, PlayerController, SimulationSettings, SimulationSummary,
     StrategyKind, StrategyRecommendation, StrategyReport, all_strategy_kinds,

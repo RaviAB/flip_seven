@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flip Seven licenses</title>
+<style>
+body { max-width: 900px; margin: 24px auto; padding: 0 20px; background: #1f2327; color: #ebe8e0; font: 16px/1.5 system-ui, sans-serif; }
+a { color: #86cbb3; } pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+</style>
+<a href="./">Back to Flip Seven</a>
+<h1>Licenses</h1>
+<p>Flip Seven source code and original app icons: <a href="LICENSE.txt">MIT License, copyright 2026 RaviAB</a>.</p>
+<p>This independent companion is not affiliated with the publisher of Flip 7. The source license does not grant rights to third-party names, trademarks, artwork, or other assets.</p>
+<h2>Bundled fonts</h2>
+<ul>
+<li><a href="assets/font-licenses/UFL.txt">Ubuntu font license</a></li>
+<li><a href="assets/font-licenses/OFL.txt">Noto Emoji font license</a></li>
+<li><a href="assets/font-licenses/Hack-Regular.txt">Hack font license</a></li>
+<li><a href="assets/font-licenses/emoji-icon-font-mit-license.txt">Emoji icon font license</a></li>
+</ul>
+{{#each licenses}}
+<h2>{{name}}</h2>
+<ul>{{#each used_by}}<li>{{crate.name}} {{crate.version}}</li>{{/each}}</ul>
+<pre>{{text}}</pre>
+{{/each}}
+</html>

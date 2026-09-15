@@ -1,5 +1,8 @@
 use eframe::egui;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
+
+mod mobile;
 
 use crate::model::{
     ActionChoice, BustCardDetail, Card, DealOutcome, DrawOdds, ExpectedValueDetail, GameState,
@@ -21,6 +24,7 @@ pub struct FlipSevenApp {
     last_frame_at: Option<Instant>,
     smoothed_frame_ms: f32,
     frame_count: u64,
+    mobile_view: mobile::MobileView,
 }
 
 impl Default for FlipSevenApp {
@@ -38,6 +42,7 @@ impl Default for FlipSevenApp {
             last_frame_at: None,
             smoothed_frame_ms: 0.0,
             frame_count: 0,
+            mobile_view: mobile::MobileView::Play,
         }
     }
 }
@@ -49,44 +54,57 @@ impl eframe::App for FlipSevenApp {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(egui::Color32::from_rgb(31, 35, 39)))
-            .show(ctx, |ui| {
-                ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(235, 232, 224));
-                ui.heading("Flip 7 Simulator");
-                ui.add_space(8.0);
+        let size = ctx.screen_rect().size();
+        let compact = size.x < 700.0 || (size.x < 1100.0 && size.y < 500.0);
+        if compact {
+            self.render_mobile(ctx);
+        } else {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(egui::Color32::from_rgb(31, 35, 39)))
+                .show(ctx, |ui| {
+                    ui.visuals_mut().override_text_color =
+                        Some(egui::Color32::from_rgb(235, 232, 224));
+                    ui.heading("Flip 7 Simulator");
+                    ui.add_space(8.0);
 
-                ui.horizontal_top(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_width((ui.available_width() - 20.0).max(360.0) * 0.52);
-                        self.render_controls(ui);
-                        ui.add_space(10.0);
-                        self.render_manual_deal_panel(ui);
-                        ui.add_space(10.0);
-                        self.render_current_player(ui);
-                        ui.add_space(10.0);
-                        self.render_scoreboard(ui);
-                    });
+                    ui.horizontal_top(|ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width((ui.available_width() - 20.0).max(360.0) * 0.52);
+                            self.render_controls(ui);
+                            ui.add_space(10.0);
+                            self.render_manual_deal_panel(ui);
+                            ui.add_space(10.0);
+                            self.render_current_player(ui);
+                            ui.add_space(10.0);
+                            self.render_scoreboard(ui);
+                        });
 
-                    ui.add_space(10.0);
+                        ui.add_space(10.0);
 
-                    ui.vertical(|ui| {
-                        ui.set_width(ui.available_width());
-                        neutral_panel_frame().show(ui, |ui| {
-                            ui.label(egui::RichText::new("Players").strong());
-                            ui.add_space(8.0);
-                            self.render_players(ui);
+                        ui.vertical(|ui| {
+                            ui.set_width(ui.available_width());
+                            neutral_panel_frame().show(ui, |ui| {
+                                ui.label(egui::RichText::new("Players").strong());
+                                ui.add_space(8.0);
+                                self.render_players(ui);
+                            });
                         });
                     });
                 });
-            });
-
-        self.render_deck_details(ctx);
+        }
+        if !compact {
+            self.render_deck_details(ctx);
+        }
         self.render_diagnostics(ctx);
     }
 }
 
 impl FlipSevenApp {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        cc.egui_ctx.set_theme(egui::Theme::Dark);
+        Self::default()
+    }
+
     fn update_frame_stats(&mut self) {
         self.frame_count += 1;
         let now = Instant::now();

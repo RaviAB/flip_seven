@@ -6,6 +6,7 @@ use super::scoreboard::PlayerScore;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UndoTracking {
     Enabled,
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
     Disabled,
 }
 
@@ -139,6 +140,7 @@ impl GameState {
         }
     }
 
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
     pub(crate) fn disable_undo_tracking(&mut self) {
         self.undo_tracking = UndoTracking::Disabled;
         self.history.clear();
