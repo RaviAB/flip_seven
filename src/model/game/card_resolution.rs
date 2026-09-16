@@ -1,4 +1,4 @@
-use crate::model::{Card, PlayerStatus};
+use crate::model::{Card, PlayerId, PlayerStatus};
 
 use super::events::{DealOutcome, PendingAction, SpecialAction};
 use super::state::GameState;
@@ -6,7 +6,7 @@ use super::state::GameState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SpecialHandling {
     ResolveNow,
-    Queue,
+    Queue { resume_after_player_id: PlayerId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,8 +81,13 @@ impl GameState {
         };
 
         let target_player_name = self.players[target_index].name().to_owned();
-        let application =
-            self.apply_card_to_player_index(target_index, card, SpecialHandling::Queue);
+        let application = self.apply_card_to_player_index(
+            target_index,
+            card,
+            SpecialHandling::Queue {
+                resume_after_player_id: pending_action.resume_after_player_id,
+            },
+        );
         let mut notes = application.note().into_iter().collect::<Vec<_>>();
 
         if self.players[target_index].has_flip_seven() {
@@ -103,7 +108,7 @@ impl GameState {
             if !target_still_active {
                 notes.push(format!("{target_player_name} is no longer active."));
             }
-            self.advance_to_next_active_player_after(pending_action.source_player_id);
+            self.advance_to_next_active_player_after(pending_action.resume_after_player_id);
 
             if self.no_active_players() {
                 return self.end_round("All players are done for the round.".to_owned());
@@ -225,10 +230,16 @@ impl GameState {
                 let action = PendingAction {
                     action: SpecialAction::FlipThree,
                     source_player_id: self.players[player_index].id(),
+                    resume_after_player_id: match special_handling {
+                        SpecialHandling::ResolveNow => self.players[player_index].id(),
+                        SpecialHandling::Queue {
+                            resume_after_player_id,
+                        } => resume_after_player_id,
+                    },
                     target_player_id: None,
                     remaining_draws: 0,
                 };
-                if special_handling == SpecialHandling::Queue {
+                if matches!(special_handling, SpecialHandling::Queue { .. }) {
                     self.queued_actions.push(action);
                     CardApplication::QueuedSpecial(SpecialAction::FlipThree)
                 } else {
@@ -241,10 +252,16 @@ impl GameState {
                 let action = PendingAction {
                     action: SpecialAction::Freeze,
                     source_player_id: self.players[player_index].id(),
+                    resume_after_player_id: match special_handling {
+                        SpecialHandling::ResolveNow => self.players[player_index].id(),
+                        SpecialHandling::Queue {
+                            resume_after_player_id,
+                        } => resume_after_player_id,
+                    },
                     target_player_id: None,
                     remaining_draws: 0,
                 };
-                if special_handling == SpecialHandling::Queue {
+                if matches!(special_handling, SpecialHandling::Queue { .. }) {
                     self.queued_actions.push(action);
                     CardApplication::QueuedSpecial(SpecialAction::Freeze)
                 } else {

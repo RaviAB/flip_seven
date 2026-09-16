@@ -572,6 +572,34 @@ mod tests {
     }
 
     #[test]
+    fn queued_freeze_preserves_priority_after_initial_flip_three_source() {
+        let mut game = game_with_draw_order(
+            4,
+            vec![
+                Card::FlipThree,
+                Card::Freeze,
+                Card::Number(1),
+                Card::Number(2),
+            ],
+        );
+
+        game.deal_next_card();
+        game.resolve_pending_action(ActionChoice::Player(PlayerId::new(2)));
+        game.deal_selected_card(Card::Freeze);
+        game.deal_selected_card(Card::Number(1));
+        game.deal_selected_card(Card::Number(2));
+
+        let queued_freeze = game.pending_action().expect("queued Freeze");
+        assert_eq!(queued_freeze.source_player_id(), PlayerId::new(2));
+        assert_eq!(game.current_player_index(), Some(1));
+
+        game.resolve_pending_action(ActionChoice::Player(PlayerId::new(3)));
+
+        assert_eq!(game.players()[3].status(), PlayerStatus::Frozen);
+        assert_eq!(game.current_player_index(), Some(1));
+    }
+
+    #[test]
     fn queued_specials_resolve_fifo_after_current_sequence() {
         let mut game = game_with_draw_order(
             2,

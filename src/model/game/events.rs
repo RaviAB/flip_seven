@@ -10,6 +10,7 @@ pub enum SpecialAction {
 pub struct PendingAction {
     pub(super) action: SpecialAction,
     pub(super) source_player_id: PlayerId,
+    pub(super) resume_after_player_id: PlayerId,
     pub(super) target_player_id: Option<PlayerId>,
     pub(super) remaining_draws: u8,
 }

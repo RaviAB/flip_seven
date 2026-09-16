@@ -195,7 +195,7 @@ impl GameState {
             return self.end_round(format!("{} hit Flip 7.", self.players[target_index].name()));
         }
 
-        self.advance_to_next_active_player_after(pending_action.source_player_id);
+        self.advance_to_next_active_player_after(pending_action.resume_after_player_id);
 
         if self.no_active_players() {
             return self.end_round("All players are done for the round.".to_owned());
