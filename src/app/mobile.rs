@@ -256,7 +256,7 @@ impl FlipSevenApp {
                                 .size(14.0),
                         )
                         .fill(fill)
-                        .stroke(egui::Stroke::new(1.0, stroke))
+                        .stroke(egui::Stroke::new(1.0_f32, stroke))
                         .min_size(egui::vec2(52.0, 48.0));
                         if ui
                             .add_enabled(enabled && dealt.is_none(), button)

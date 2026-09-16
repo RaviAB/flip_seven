@@ -545,7 +545,7 @@ impl FlipSevenApp {
                 egui::Frame::new()
                     .fill(egui::Color32::from_rgba_premultiplied(18, 20, 22, 232))
                     .stroke(egui::Stroke::new(
-                        1.0,
+                        1.0_f32,
                         egui::Color32::from_rgb(104, 116, 128),
                     ))
                     .corner_radius(egui::CornerRadius::same(6))
@@ -861,7 +861,7 @@ fn show_immediate_hover(
             egui::Frame::popup(ui.style())
                 .fill(egui::Color32::from_rgb(36, 39, 43))
                 .stroke(egui::Stroke::new(
-                    1.0,
+                    1.0_f32,
                     egui::Color32::from_rgb(104, 116, 128),
                 ))
                 .inner_margin(egui::Margin::symmetric(10, 8))
@@ -963,9 +963,9 @@ fn render_card_count_column(
 fn render_card_chip(ui: &mut egui::Ui, card: Card, selected: bool) -> egui::Response {
     let (fill, stroke, text_color) = card_colors(card);
     let stroke = if selected {
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(245, 226, 130))
+        egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(245, 226, 130))
     } else {
-        egui::Stroke::new(1.0, stroke)
+        egui::Stroke::new(1.0_f32, stroke)
     };
     let text = egui::RichText::new(card.short_label())
         .strong()
@@ -1300,7 +1300,7 @@ fn player_frame(status: PlayerStatus, is_current: bool) -> egui::Frame {
             PlayerStatus::Busted => egui::Color32::from_rgb(222, 102, 96),
         }
     };
-    let stroke = egui::Stroke::new(if is_current { 3.0 } else { 1.0 }, stroke_color);
+    let stroke = egui::Stroke::new(if is_current { 3.0_f32 } else { 1.0_f32 }, stroke_color);
 
     egui::Frame::new()
         .fill(fill)
@@ -1340,7 +1340,7 @@ fn scoreboard_frame() -> egui::Frame {
 fn app_panel_frame(fill: egui::Color32, stroke: egui::Color32) -> egui::Frame {
     egui::Frame::new()
         .fill(fill)
-        .stroke(egui::Stroke::new(1.0, stroke))
+        .stroke(egui::Stroke::new(1.0_f32, stroke))
         .corner_radius(egui::CornerRadius::same(6))
         .inner_margin(egui::Margin::symmetric(12, 10))
 }
