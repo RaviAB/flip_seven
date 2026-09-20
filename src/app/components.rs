@@ -87,9 +87,9 @@ pub(super) fn render_card_count_column(
 pub(super) fn render_card_chip(ui: &mut egui::Ui, card: Card, selected: bool) -> egui::Response {
     let (fill, stroke, text_color) = card_colors(card);
     let stroke = if selected {
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(245, 226, 130))
+        egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(245, 226, 130))
     } else {
-        egui::Stroke::new(1.0, stroke)
+        egui::Stroke::new(1.0_f32, stroke)
     };
     let text = egui::RichText::new(card.short_label())
         .strong()
