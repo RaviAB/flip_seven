@@ -8,7 +8,7 @@ description = "A Flip Seven scorekeeper and probability companion for desktop an
 
 [features]
 default = ["simulation"]
-simulation = ["dep:rayon"]
+simulation = ["dep:clap", "dep:csv", "dep:rayon", "dep:serde", "dep:serde_json"]
 
 [[bin]]
 name = "offline"
@@ -21,7 +21,11 @@ rand = "0.9"
 web-time = "1.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+clap = { version = "4.5", features = ["derive"], optional = true }
+csv = { version = "1.3", optional = true }
 rayon = { version = "1.10", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }

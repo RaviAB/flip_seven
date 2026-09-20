@@ -16,6 +16,31 @@ Offline strategy simulations remain available separately:
 cargo run --release --bin offline -- --help
 ```
 
+The library keeps gameplay internals private. Native simulation consumers use
+the feature-gated `SimulationConfig`, `ComparisonMode`, `StrategyKind`,
+`SimulationReport`, and `run_simulation` facade. Invalid settings are reported
+as errors rather than silently adjusted.
+
+Simulation reports distinguish completed matches from matches stopped by
+`max_rounds`. Only a unique leader who reaches the target wins. Win rates,
+confidence intervals, and average rounds to finish use completed matches;
+score, risk, and seat-exposure statistics include all runs. With no completed
+matches, numeric win rate and average rounds to finish are zero, the confidence
+interval is `[0, 1]`, and the table displays `-` for win rate. JSON and CSV include
+completion and round-limit counts. Rejected commands or stalled rounds fail the
+simulation instead of producing a partial success report.
+
+Both comparison modes support `min_matches`, `max_matches`, and `win_ci_width`.
+Match limits are per seating; mirrored seatings and multiple strategy pairings
+increase the total number of runs. Convergence uses completed matches and extends
+the seeded sequences without rerunning earlier samples. Results are aggregated
+in bounded batches with the same output for serial and parallel execution.
+
+When a player who already holds Second Chance draws another, the duplicate is
+given immediately to an eligible active player. If nobody can receive it, the
+card is discarded. During Flip Three, this transfer pauses the sequence; other
+special cards are resolved later in draw order.
+
 ## Web Development
 
 Install Rust, Node.js 22+, and Trunk:
@@ -68,6 +93,7 @@ service worker, to avoid stale development builds.
 ```sh
 cargo fmt
 cargo test
+cargo test --no-default-features
 cargo clippy --all-targets -- -D warnings
 cargo clippy --target wasm32-unknown-unknown --no-default-features --bin flip_seven -- -D warnings
 env NO_COLOR=true trunk build --release

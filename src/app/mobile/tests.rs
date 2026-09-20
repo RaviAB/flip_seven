@@ -1,4 +1,8 @@
-use super::*;
+use crate::model::{Card, GameState};
+use eframe::egui;
+
+use super::super::FlipSevenApp;
+use super::MobileView;
 
 fn frame(
     app: &mut FlipSevenApp,

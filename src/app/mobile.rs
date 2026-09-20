@@ -1,4 +1,18 @@
-use super::*;
+use eframe::egui;
+
+use crate::model::{Card, PendingStep};
+
+use super::FlipSevenApp;
+use super::components::{render_card, render_card_count_column, render_hand};
+use super::odds::render_bust_hover;
+use super::presentation::{
+    card_tooltip, display_round_score, format_percent, player_score_tooltip, queued_action_suffix,
+    round_bust_risk_tooltip, round_outcome_label, special_action_label,
+};
+use super::theme::{
+    card_colors, current_player_frame, manual_deal_frame, neutral_panel_frame, player_frame,
+    status_chip,
+};
 
 #[cfg(test)]
 mod tests;
@@ -105,13 +119,13 @@ impl FlipSevenApp {
     }
 
     fn render_mobile_play(&mut self, ui: &mut egui::Ui) {
-        let pending = self.game.pending_action().cloned();
+        let pending = self.game.pending_action();
         current_player_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().interact_size.y = 24.0;
             let player = pending
                 .as_ref()
-                .and_then(PendingAction::target_player_id)
+                .and_then(|pending| pending.target_player_id())
                 .and_then(|id| self.game.players().iter().find(|player| player.id() == id))
                 .or_else(|| self.game.current_player());
             if let Some(player) = player {
@@ -175,10 +189,15 @@ impl FlipSevenApp {
                 );
                 let targets: Vec<_> = self
                     .game
-                    .players()
-                    .iter()
-                    .filter(|player| player.is_active_in_round())
-                    .map(|player| (player.id(), player.name().to_owned()))
+                    .legal_pending_targets()
+                    .into_iter()
+                    .filter_map(|id| {
+                        self.game
+                            .players()
+                            .iter()
+                            .find(|player| player.id() == id)
+                            .map(|player| (id, player.name().to_owned()))
+                    })
                     .collect();
                 for (id, name) in targets {
                     if ui
@@ -236,7 +255,7 @@ impl FlipSevenApp {
             && self
                 .game
                 .pending_action()
-                .is_none_or(PendingAction::awaiting_selected_draws);
+                .is_none_or(PendingStep::awaiting_selected_draws);
         let mut dealt = None;
         manual_deal_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());

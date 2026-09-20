@@ -1,287 +1,261 @@
-use crate::model::{Card, PlayerId, PlayerStatus};
+use crate::model::{Card, PlayerStatus, ScoreBonus};
 
-use super::events::{DealOutcome, PendingAction, SpecialAction};
+use super::events::{
+    CardEffect, DealSource, GameError, GameEvent, GameResult, PendingResolution, PendingStep,
+    ResolutionTiming, RoundEndReason, SpecialAction,
+};
 use super::state::GameState;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SpecialHandling {
-    ResolveNow,
-    Queue { resume_after_player_id: PlayerId },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FlipSevenBonus {
-    No,
-    Yes,
-}
-
-impl FlipSevenBonus {
-    pub(super) fn applies(self) -> bool {
-        self == Self::Yes
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CardApplication {
     Number,
     Bonus,
     SecondChance,
+    DiscardedSecondChance,
     UsedSecondChance,
     Busted,
-    NeedsTarget(SpecialAction),
-    QueuedSpecial(SpecialAction),
-}
-
-impl CardApplication {
-    fn note(self) -> Option<String> {
-        match self {
-            Self::UsedSecondChance => Some("Second Chance was used.".to_owned()),
-            Self::Busted => Some("Player busted.".to_owned()),
-            Self::QueuedSpecial(action) => Some(format!(
-                "Queued {} for later resolution.",
-                special_action_label(action)
-            )),
-            Self::Number | Self::Bonus | Self::SecondChance | Self::NeedsTarget(_) => None,
-        }
-    }
+    TargetAction {
+        action: SpecialAction,
+        source_player_id: crate::model::PlayerId,
+    },
 }
 
 impl GameState {
-    pub(super) fn deal_selected_flip_three_card(
-        &mut self,
-        card: Card,
-        pending_action: PendingAction,
-    ) -> DealOutcome {
-        let Some(target_player_id) = pending_action.target_player_id else {
-            return DealOutcome::WaitingForTarget {
-                action: pending_action.action,
-            };
+    pub(super) fn deal_selected_flip_three_card(&mut self, card: Card) -> GameResult {
+        let pending = self
+            .pending_action()
+            .expect("caller checked pending action");
+        let Some((source_player_id, target_player_id, remaining_draws, queue_checkpoint)) =
+            pending.flip_three_state()
+        else {
+            return Err(GameError::PendingTarget {
+                action: pending.action(),
+            });
         };
         let Some(target_index) = self.player_index(target_player_id) else {
-            return DealOutcome::InvalidTarget;
+            return Err(GameError::InvalidTarget);
         };
-
-        if !self.players[target_index].is_active_in_round() {
-            return DealOutcome::InvalidTarget;
+        if !self.live.players[target_index].is_active_in_round() {
+            return Err(GameError::InvalidTarget);
         }
-
         if !self
+            .live
             .deck
             .next_draw_pool_counts()
             .iter()
             .any(|(candidate, _)| *candidate == card)
         {
-            return DealOutcome::SelectedCardUnavailable;
+            return Err(GameError::CardUnavailable { card });
         }
 
         self.save_snapshot();
         self.record_pre_draw_telemetry(target_index);
-        let Some(card) = self.deck.draw_selected(card) else {
-            return DealOutcome::SelectedCardUnavailable;
+        let Some(card) = self.live.deck.draw_selected(card) else {
+            return Err(GameError::CardUnavailable { card });
         };
+        self.live
+            .pending_resolution
+            .as_mut()
+            .expect("pending draw requires a resolution")
+            .pop_front();
+        let application = self.apply_card_to_player_index(target_index, card);
 
-        let target_player_name = self.players[target_index].name().to_owned();
-        let application = self.apply_card_to_player_index(
-            target_index,
-            card,
-            SpecialHandling::Queue {
-                resume_after_player_id: pending_action.resume_after_player_id,
-            },
-        );
-        let mut notes = application.note().into_iter().collect::<Vec<_>>();
-
-        if self.players[target_index].has_flip_seven() {
-            self.flip_seven_player_id = Some(target_player_id);
-            return self.end_round(format!("{target_player_name} hit Flip 7."));
+        if self.live.players[target_index].has_flip_seven() {
+            self.live.flip_seven_player_id = Some(target_player_id);
+            return Ok(self.end_round(RoundEndReason::FlipSeven {
+                player_id: target_player_id,
+            }));
         }
 
-        let remaining_draws = pending_action.remaining_draws.saturating_sub(1);
-        let target_still_active = self.players[target_index].is_active_in_round();
-
-        if remaining_draws > 0 && target_still_active {
-            self.pending_action = Some(PendingAction {
+        let remaining_draws = remaining_draws.saturating_sub(1);
+        let target_still_active = self.live.players[target_index].is_active_in_round();
+        let resolution = self
+            .live
+            .pending_resolution
+            .as_mut()
+            .expect("pending draw requires a resolution");
+        if !target_still_active {
+            resolution.cancel_after(queue_checkpoint);
+        } else if remaining_draws > 0 {
+            resolution.push_immediate(PendingStep::FlipThreeDraws {
+                source_player_id,
+                target_player_id,
                 remaining_draws,
-                ..pending_action
+                queue_checkpoint,
             });
-        } else {
-            self.pending_action = None;
-            if !target_still_active {
-                notes.push(format!("{target_player_name} is no longer active."));
-            }
-            self.advance_to_next_active_player_after(pending_action.resume_after_player_id);
-
-            if self.no_active_players() {
-                return self.end_round("All players are done for the round.".to_owned());
-            }
-
-            self.activate_next_queued_action();
         }
 
-        DealOutcome::FlipThreeCardDealt {
-            target_player_id,
-            target_player_name,
+        let (effect, target_action) = self.effect_for_application(application, card);
+        if let Some((action, action_source)) = target_action {
+            let timing = if action == SpecialAction::SecondChance {
+                ResolutionTiming::Immediate
+            } else {
+                ResolutionTiming::Deferred
+            };
+            let step = PendingStep::ChooseTarget {
+                action,
+                source_player_id: action_source,
+                timing,
+            };
+            let resolution = self
+                .live
+                .pending_resolution
+                .as_mut()
+                .expect("pending draw requires a resolution");
+            match timing {
+                ResolutionTiming::Immediate => resolution.push_immediate(step),
+                ResolutionTiming::Deferred => resolution.push_deferred(step),
+            }
+        }
+
+        if self.no_active_players() {
+            return Ok(self.end_round(RoundEndReason::AllPlayersDone));
+        }
+        self.complete_pending_if_empty();
+        Ok(GameEvent::CardDealt {
+            player_id: target_player_id,
             card,
-            remaining_draws: if target_still_active {
+            source: DealSource::Selected,
+            effect,
+            remaining_flip_three_draws: Some(if target_still_active {
                 remaining_draws
             } else {
                 0
-            },
-            notes,
-        }
+            }),
+        })
     }
 
-    pub(super) fn apply_card_to_current_player(&mut self, card: Card) -> DealOutcome {
-        let player_index = self.current_player_index;
-        let player_id = self.players[player_index].id();
-        let player_name = self.players[player_index].name().to_owned();
-
-        match self.apply_card_to_player_index(player_index, card, SpecialHandling::ResolveNow) {
-            CardApplication::Number => {
-                if self.players[player_index].has_flip_seven() {
-                    self.flip_seven_player_id = Some(player_id);
-                    return self.end_round(format!("{player_name} hit Flip 7."));
-                }
-
-                self.advance_to_next_active_player_after(player_id);
-                DealOutcome::DealtNumber {
-                    player_id,
-                    player_name,
-                    card,
-                }
-            }
-            CardApplication::Bonus => {
-                self.advance_to_next_active_player_after(player_id);
-                DealOutcome::Bonus {
-                    player_id,
-                    player_name,
-                    card,
-                }
-            }
-            CardApplication::SecondChance => {
-                self.advance_to_next_active_player_after(player_id);
-                DealOutcome::SecondChance {
-                    player_id,
-                    player_name,
-                }
-            }
-            CardApplication::UsedSecondChance => {
-                self.advance_to_next_active_player_after(player_id);
-                DealOutcome::UsedSecondChance {
-                    player_id,
-                    player_name,
-                    duplicate: card,
-                }
-            }
-            CardApplication::Busted => {
-                self.advance_to_next_active_player_after(player_id);
-                let outcome = DealOutcome::Busted {
-                    player_id,
-                    player_name,
-                    duplicate: card,
-                };
-
-                if self.no_active_players() {
-                    self.end_round("All players are done for the round.".to_owned())
-                } else {
-                    outcome
-                }
-            }
-            CardApplication::NeedsTarget(action) => DealOutcome::SpecialNeedsTarget {
-                action,
-                source_player_id: player_id,
-                source_player_name: player_name,
-            },
-            CardApplication::QueuedSpecial(_) => DealOutcome::DeckEmpty,
-        }
-    }
-
-    fn apply_card_to_player_index(
+    pub(super) fn apply_card_to_current_player(
         &mut self,
-        player_index: usize,
         card: Card,
-        special_handling: SpecialHandling,
-    ) -> CardApplication {
+        source: DealSource,
+    ) -> GameEvent {
+        let player_index = self.live.turn_player_index;
+        let player_id = self.live.players[player_index].id();
+        let application = self.apply_card_to_player_index(player_index, card);
+
+        if application == CardApplication::Number
+            && self.live.players[player_index].has_flip_seven()
+        {
+            self.live.flip_seven_player_id = Some(player_id);
+            return self.end_round(RoundEndReason::FlipSeven { player_id });
+        }
+
+        let (effect, target_action) = self.effect_for_application(application, card);
+        if let Some((action, action_source)) = target_action {
+            let timing = ResolutionTiming::Immediate;
+            let mut resolution = PendingResolution::new(player_id);
+            resolution.push_deferred(PendingStep::ChooseTarget {
+                action,
+                source_player_id: action_source,
+                timing,
+            });
+            self.live.pending_resolution = Some(resolution);
+            return GameEvent::TargetRequired {
+                action,
+                source_player_id: action_source,
+                timing,
+            };
+        }
+
+        self.advance_to_next_active_player_after(player_id);
+        if application == CardApplication::Busted && self.no_active_players() {
+            return self.end_round(RoundEndReason::AllPlayersDone);
+        }
+        GameEvent::CardDealt {
+            player_id,
+            card,
+            source,
+            effect,
+            remaining_flip_three_draws: None,
+        }
+    }
+
+    fn effect_for_application(
+        &self,
+        application: CardApplication,
+        card: Card,
+    ) -> (CardEffect, Option<(SpecialAction, crate::model::PlayerId)>) {
+        match application {
+            CardApplication::Number => (CardEffect::NumberAdded, None),
+            CardApplication::Bonus => (CardEffect::BonusAdded, None),
+            CardApplication::SecondChance => (CardEffect::SecondChanceKept, None),
+            CardApplication::DiscardedSecondChance => (CardEffect::SecondChanceDiscarded, None),
+            CardApplication::UsedSecondChance => {
+                (CardEffect::SecondChanceUsed { duplicate: card }, None)
+            }
+            CardApplication::Busted => (CardEffect::Busted { duplicate: card }, None),
+            CardApplication::TargetAction {
+                action,
+                source_player_id,
+            } => (
+                CardEffect::SpecialQueued {
+                    action,
+                    timing: if action == SpecialAction::SecondChance {
+                        ResolutionTiming::Immediate
+                    } else {
+                        ResolutionTiming::Deferred
+                    },
+                },
+                Some((action, source_player_id)),
+            ),
+        }
+    }
+
+    fn apply_card_to_player_index(&mut self, player_index: usize, card: Card) -> CardApplication {
         match card {
             Card::Number(value) => {
-                if self.players[player_index].has_number(value) {
-                    self.deck.discard(card);
-                    if self.players[player_index].use_second_chance() {
-                        self.deck.discard(Card::SecondChance);
+                if self.live.players[player_index].has_number(value) {
+                    self.live.deck.discard(card);
+                    if self.live.players[player_index].use_second_chance() {
+                        self.live.deck.discard(Card::SecondChance);
                         CardApplication::UsedSecondChance
                     } else {
-                        self.finish_player(player_index, PlayerStatus::Busted, FlipSevenBonus::No);
+                        self.finish_player(player_index, PlayerStatus::Busted, ScoreBonus::None);
                         CardApplication::Busted
                     }
                 } else {
-                    self.players[player_index].receive_card(card);
+                    self.live.players[player_index].receive_card(card);
                     CardApplication::Number
                 }
             }
             Card::Bonus(_) => {
-                self.players[player_index].receive_card(card);
+                self.live.players[player_index].receive_card(card);
                 CardApplication::Bonus
             }
             Card::SecondChance => {
-                self.players[player_index].receive_card(card);
-                CardApplication::SecondChance
-            }
-            Card::FlipThree => {
-                self.deck.discard(card);
-                let action = PendingAction {
-                    action: SpecialAction::FlipThree,
-                    source_player_id: self.players[player_index].id(),
-                    resume_after_player_id: match special_handling {
-                        SpecialHandling::ResolveNow => self.players[player_index].id(),
-                        SpecialHandling::Queue {
-                            resume_after_player_id,
-                        } => resume_after_player_id,
-                    },
-                    target_player_id: None,
-                    remaining_draws: 0,
-                };
-                if matches!(special_handling, SpecialHandling::Queue { .. }) {
-                    self.queued_actions.push(action);
-                    CardApplication::QueuedSpecial(SpecialAction::FlipThree)
+                if !self.live.players[player_index].has_second_chance() {
+                    self.live.players[player_index].receive_card(card);
+                    CardApplication::SecondChance
                 } else {
-                    self.pending_action = Some(action);
-                    CardApplication::NeedsTarget(SpecialAction::FlipThree)
+                    let source_player_id = self.live.players[player_index].id();
+                    let has_recipient = self.live.players.iter().any(|player| {
+                        player.is_active_in_round()
+                            && player.id() != source_player_id
+                            && !player.has_second_chance()
+                    });
+                    if has_recipient {
+                        CardApplication::TargetAction {
+                            action: SpecialAction::SecondChance,
+                            source_player_id,
+                        }
+                    } else {
+                        self.live.deck.discard(card);
+                        CardApplication::DiscardedSecondChance
+                    }
                 }
             }
-            Card::Freeze => {
-                self.deck.discard(card);
-                let action = PendingAction {
-                    action: SpecialAction::Freeze,
-                    source_player_id: self.players[player_index].id(),
-                    resume_after_player_id: match special_handling {
-                        SpecialHandling::ResolveNow => self.players[player_index].id(),
-                        SpecialHandling::Queue {
-                            resume_after_player_id,
-                        } => resume_after_player_id,
+            Card::FlipThree | Card::Freeze => {
+                self.live.deck.discard(card);
+                CardApplication::TargetAction {
+                    action: if card == Card::FlipThree {
+                        SpecialAction::FlipThree
+                    } else {
+                        SpecialAction::Freeze
                     },
-                    target_player_id: None,
-                    remaining_draws: 0,
-                };
-                if matches!(special_handling, SpecialHandling::Queue { .. }) {
-                    self.queued_actions.push(action);
-                    CardApplication::QueuedSpecial(SpecialAction::Freeze)
-                } else {
-                    self.pending_action = Some(action);
-                    CardApplication::NeedsTarget(SpecialAction::Freeze)
+                    source_player_id: self.live.players[player_index].id(),
                 }
             }
         }
-    }
-
-    pub(super) fn activate_next_queued_action(&mut self) {
-        if self.pending_action.is_none() && !self.queued_actions.is_empty() {
-            self.pending_action = Some(self.queued_actions.remove(0));
-        }
-    }
-}
-
-fn special_action_label(action: SpecialAction) -> &'static str {
-    match action {
-        SpecialAction::FlipThree => "Flip Three",
-        SpecialAction::Freeze => "Freeze",
     }
 }

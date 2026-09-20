@@ -1,8 +1,9 @@
-use crate::model::{DrawOdds, GameState, PendingAction, PlayerId, SpecialAction};
+use crate::model::{DrawOdds, GameState, PendingStep, PlayerId, SpecialAction};
 
-use super::kind::{StrategyKind, strategy_label};
+use super::config::SimulationConfig;
+use super::kind::StrategyKind;
 use super::monte_carlo::evaluate_monte_carlo_actions;
-use super::report::SimulationSettings;
+use super::simulator::SimulationFailure;
 use super::static_equity::max_win_static_decision;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,7 +16,7 @@ pub enum AiDecision {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionContext {
     pub player_id: PlayerId,
-    pub pending_action: Option<PendingAction>,
+    pub pending_action: Option<PendingStep>,
     pub legal_targets: Vec<PlayerId>,
     pub draw_odds: Option<DrawOdds>,
 }
@@ -44,50 +45,61 @@ pub(super) struct WinProbabilityProfile {
     pub(super) required_ev_edge: f64,
 }
 
-pub fn recommend_decision(
+pub(super) fn recommend_decision(
     game: &GameState,
     strategy: StrategyKind,
-    settings: &SimulationSettings,
-) -> StrategyRecommendation {
+    settings: &SimulationConfig,
+) -> Result<StrategyRecommendation, SimulationFailure> {
     let Some(context) = decision_context(game) else {
-        return StrategyRecommendation {
+        return Ok(StrategyRecommendation {
             strategy,
             decision: None,
             rationale: "No legal AI decision is pending.".to_owned(),
-        };
+        });
     };
 
-    let decision = match strategy {
-        StrategyKind::Conservative | StrategyKind::Balanced | StrategyKind::Aggressive => {
-            risk_profile_decision(game, &context, strategy, settings)
+    let decision = if context
+        .pending_action
+        .as_ref()
+        .is_some_and(|step| step.needs_target())
+    {
+        match strategy {
+            StrategyKind::MaxWinProbability | StrategyKind::MaxWinStatic => {
+                target_by_rollout_value(game, &context, strategy, settings)?
+            }
+            _ => target_by_heuristic(game, &context, strategy),
         }
-        StrategyKind::MaxRoundEv => max_round_ev_decision(game, &context, settings),
-        StrategyKind::MaxWinProbability => max_win_probability_decision(game, &context, settings),
-        StrategyKind::MaxWinStatic => max_win_static_strategy_decision(game, &context, settings),
-        StrategyKind::StayAtNumberCount(_) | StrategyKind::StayAtScore(_) => {
-            simple_threshold_decision(game, &context, strategy, settings)
+    } else {
+        match strategy {
+            StrategyKind::Conservative | StrategyKind::Balanced | StrategyKind::Aggressive => {
+                risk_profile_decision(game, &context, strategy, settings)
+            }
+            StrategyKind::MaxRoundEv => max_round_ev_decision(game, &context, settings),
+            StrategyKind::MaxWinProbability => {
+                max_win_probability_decision(game, &context, settings)
+            }
+            StrategyKind::MaxWinStatic => {
+                max_win_static_strategy_decision(game, &context, settings)
+            }
+            StrategyKind::StayAtNumberCount(_) | StrategyKind::StayAtScore(_) => {
+                simple_threshold_decision(game, &context, strategy, settings)
+            }
         }
     };
 
-    StrategyRecommendation {
+    Ok(StrategyRecommendation {
         strategy,
         decision: decision.decision,
         rationale: decision.rationale,
-    }
+    })
 }
 
 fn risk_profile_decision(
     game: &GameState,
     context: &DecisionContext,
     strategy: StrategyKind,
-    settings: &SimulationSettings,
+    settings: &SimulationConfig,
 ) -> DecisionWithRationale {
-    if let Some(pending_action) = context.pending_action.as_ref()
-        && pending_action.needs_target()
-    {
-        return target_by_heuristic(game, context, strategy);
-    }
-
     let Some(odds) = context.draw_odds.as_ref() else {
         return DecisionWithRationale {
             decision: None,
@@ -121,7 +133,7 @@ fn risk_profile_decision(
             decision: Some(AiDecision::Draw),
             rationale: format!(
                 "Draw: {} accepts {:.1}% bust risk for next-card EV {:.2}.",
-                strategy_label(strategy),
+                strategy.label(),
                 odds.bust_probability * 100.0,
                 odds.expected_score_after_draw
             ),
@@ -131,7 +143,7 @@ fn risk_profile_decision(
             decision: Some(AiDecision::Stay),
             rationale: format!(
                 "Stay: {} banks {} with {:.1}% bust risk on a draw.",
-                strategy_label(strategy),
+                strategy.label(),
                 odds.current_score,
                 odds.bust_probability * 100.0
             ),
@@ -143,14 +155,8 @@ fn simple_threshold_decision(
     game: &GameState,
     context: &DecisionContext,
     strategy: StrategyKind,
-    settings: &SimulationSettings,
+    settings: &SimulationConfig,
 ) -> DecisionWithRationale {
-    if let Some(pending_action) = context.pending_action.as_ref()
-        && pending_action.needs_target()
-    {
-        return target_by_heuristic(game, context, strategy);
-    }
-
     let Some(odds) = context.draw_odds.as_ref() else {
         return DecisionWithRationale {
             decision: None,
@@ -187,7 +193,7 @@ fn simple_threshold_decision(
             decision: Some(AiDecision::Draw),
             rationale: format!(
                 "Draw: {} keeps drawing while protected by Second Chance.",
-                strategy_label(strategy)
+                strategy.label()
             ),
         };
     }
@@ -205,32 +211,23 @@ fn simple_threshold_decision(
             decision: Some(AiDecision::Stay),
             rationale: format!(
                 "Stay: {} threshold reached with {} points.",
-                strategy_label(strategy),
+                strategy.label(),
                 odds.current_score
             ),
         }
     } else {
         DecisionWithRationale {
             decision: Some(AiDecision::Draw),
-            rationale: format!(
-                "Draw: {} threshold has not been reached.",
-                strategy_label(strategy)
-            ),
+            rationale: format!("Draw: {} threshold has not been reached.", strategy.label()),
         }
     }
 }
 
 fn max_round_ev_decision(
-    game: &GameState,
+    _game: &GameState,
     context: &DecisionContext,
-    _settings: &SimulationSettings,
+    _settings: &SimulationConfig,
 ) -> DecisionWithRationale {
-    if let Some(pending_action) = context.pending_action.as_ref()
-        && pending_action.needs_target()
-    {
-        return target_by_heuristic(game, context, StrategyKind::MaxRoundEv);
-    }
-
     let Some(odds) = context.draw_odds.as_ref() else {
         return DecisionWithRationale {
             decision: None,
@@ -260,14 +257,8 @@ fn max_round_ev_decision(
 fn max_win_probability_decision(
     game: &GameState,
     context: &DecisionContext,
-    settings: &SimulationSettings,
+    settings: &SimulationConfig,
 ) -> DecisionWithRationale {
-    if let Some(pending_action) = context.pending_action.as_ref()
-        && pending_action.needs_target()
-    {
-        return target_by_rollout_value(game, context, StrategyKind::MaxWinProbability, settings);
-    }
-
     let legal = legal_ai_decisions(game);
     if legal.is_empty() {
         return DecisionWithRationale {
@@ -282,7 +273,7 @@ fn max_win_probability_decision(
 fn max_win_probability_draw_stay_decision(
     game: &GameState,
     context: &DecisionContext,
-    settings: &SimulationSettings,
+    settings: &SimulationConfig,
 ) -> DecisionWithRationale {
     let Some(odds) = context.draw_odds.as_ref() else {
         return DecisionWithRationale {
@@ -366,14 +357,8 @@ fn max_win_probability_draw_stay_decision(
 fn max_win_static_strategy_decision(
     game: &GameState,
     context: &DecisionContext,
-    settings: &SimulationSettings,
+    settings: &SimulationConfig,
 ) -> DecisionWithRationale {
-    if let Some(pending_action) = context.pending_action.as_ref()
-        && pending_action.needs_target()
-    {
-        return target_by_rollout_value(game, context, StrategyKind::MaxWinStatic, settings);
-    }
-
     let legal = legal_ai_decisions(game);
     if legal.is_empty() {
         return DecisionWithRationale {
@@ -397,7 +382,7 @@ fn leading_opponent_score(game: &GameState, player_id: PlayerId) -> u32 {
 pub(super) fn win_probability_profile(
     leader_total: u32,
     stay_total: u32,
-    settings: &SimulationSettings,
+    settings: &SimulationConfig,
 ) -> WinProbabilityProfile {
     let target = settings.target_score.max(1) as f64;
     let score_pressure = (leader_total as f64 - stay_total as f64) / target;
@@ -431,6 +416,9 @@ fn target_by_heuristic(
     }
 
     let chosen = match pending_action.action() {
+        SpecialAction::SecondChance => candidates
+            .into_iter()
+            .min_by_key(|target| projected_player_value(game, *target)),
         SpecialAction::Freeze => candidates
             .into_iter()
             .max_by_key(|target| projected_player_value(game, *target)),
@@ -466,8 +454,8 @@ fn target_by_heuristic(
         rationale: format!(
             "Choose {} for {} by {} target heuristic.",
             player_name(game, target_id),
-            special_action_label(pending_action.action()),
-            strategy_label(strategy)
+            format_args!("{:?}", pending_action.action()),
+            strategy.label()
         ),
     }
 }
@@ -476,13 +464,13 @@ fn target_by_rollout_value(
     game: &GameState,
     context: &DecisionContext,
     _strategy: StrategyKind,
-    settings: &SimulationSettings,
-) -> DecisionWithRationale {
+    settings: &SimulationConfig,
+) -> Result<DecisionWithRationale, SimulationFailure> {
     let Some(pending_action) = context.pending_action.as_ref() else {
-        return DecisionWithRationale {
+        return Ok(DecisionWithRationale {
             decision: None,
             rationale: "No target decision is pending.".to_owned(),
-        };
+        });
     };
 
     let decisions = context
@@ -493,12 +481,12 @@ fn target_by_rollout_value(
         .collect::<Vec<_>>();
 
     let Some(evaluation) =
-        evaluate_monte_carlo_actions(game, context.player_id, &decisions, settings)
+        evaluate_monte_carlo_actions(game, context.player_id, &decisions, settings)?
     else {
-        return DecisionWithRationale {
+        return Ok(DecisionWithRationale {
             decision: None,
             rationale: "No active legal targets are available.".to_owned(),
-        };
+        });
     };
 
     let target_name = match evaluation.decision {
@@ -506,19 +494,20 @@ fn target_by_rollout_value(
         AiDecision::Stay | AiDecision::Draw => "-".to_owned(),
     };
     let basis = format!(
-        "Monte Carlo win {:.1}%, utility {:.3} over {} samples",
+        "Monte Carlo win {:.1}%, utility {:.3}; {} completed of {} samples",
         evaluation.win_rate * 100.0,
         evaluation.average_utility,
+        evaluation.completed_samples,
         evaluation.samples
     );
 
-    DecisionWithRationale {
+    Ok(DecisionWithRationale {
         decision: Some(evaluation.decision),
         rationale: format!(
             "Choose {target_name} for {}: {basis}.",
-            special_action_label(pending_action.action())
+            format_args!("{:?}", pending_action.action())
         ),
-    }
+    })
 }
 
 pub(super) fn current_strategy_player_id(game: &GameState) -> Option<PlayerId> {
@@ -543,8 +532,8 @@ fn decision_context(game: &GameState) -> Option<DecisionContext> {
 
     Some(DecisionContext {
         player_id,
-        pending_action: game.pending_action().cloned(),
-        legal_targets: game.legal_active_targets(),
+        pending_action: game.pending_action(),
+        legal_targets: game.legal_pending_targets(),
         draw_odds,
     })
 }
@@ -557,7 +546,7 @@ pub(super) fn legal_ai_decisions(game: &GameState) -> Vec<AiDecision> {
     if let Some(pending_action) = game.pending_action() {
         if pending_action.needs_target() {
             return game
-                .legal_active_targets()
+                .legal_pending_targets()
                 .into_iter()
                 .map(AiDecision::ChooseTarget)
                 .collect();
@@ -641,11 +630,4 @@ fn player_name(game: &GameState, player_id: PlayerId) -> String {
         .find(|player| player.id() == player_id)
         .map(|player| player.name().to_owned())
         .unwrap_or_else(|| format!("Player {}", player_id.display_number()))
-}
-
-fn special_action_label(action: SpecialAction) -> &'static str {
-    match action {
-        SpecialAction::FlipThree => "Flip Three",
-        SpecialAction::Freeze => "Freeze",
-    }
 }

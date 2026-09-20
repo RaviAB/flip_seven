@@ -1,7 +1,7 @@
 use crate::model::{GameState, PlayerId};
 
+use super::config::SimulationConfig;
 use super::decision::{AiDecision, DecisionContext, DecisionWithRationale};
-use super::report::SimulationSettings;
 
 #[derive(Debug, Clone, Copy)]
 struct StaticWinWeights {
@@ -66,7 +66,7 @@ struct EquityTerm {
 pub(super) fn max_win_static_decision(
     game: &GameState,
     context: &DecisionContext,
-    settings: &SimulationSettings,
+    settings: &SimulationConfig,
 ) -> DecisionWithRationale {
     let Some(odds) = context.draw_odds.as_ref() else {
         return DecisionWithRationale {
@@ -131,7 +131,7 @@ pub(super) fn max_win_static_decision(
 pub(super) fn static_win_evaluation(
     game: &GameState,
     context: &DecisionContext,
-    settings: &SimulationSettings,
+    settings: &SimulationConfig,
 ) -> Option<StaticWinEvaluation> {
     static_win_evaluation_with_terms(game, context, settings).map(|(evaluation, _)| evaluation)
 }
@@ -139,7 +139,7 @@ pub(super) fn static_win_evaluation(
 pub(super) fn static_win_features(
     game: &GameState,
     player_id: PlayerId,
-    settings: &SimulationSettings,
+    settings: &SimulationConfig,
 ) -> Option<StaticWinFeatures> {
     let odds = game.draw_odds_for_player(player_id)?;
     let player = game
@@ -241,7 +241,7 @@ pub(super) fn static_win_features(
 fn static_win_evaluation_with_terms(
     game: &GameState,
     context: &DecisionContext,
-    settings: &SimulationSettings,
+    settings: &SimulationConfig,
 ) -> Option<(StaticWinEvaluation, Vec<EquityTerm>)> {
     let features = static_win_features(game, context.player_id, settings)?;
     let weights = StaticWinWeights::CALIBRATED_V1;

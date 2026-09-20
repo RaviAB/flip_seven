@@ -53,6 +53,7 @@ impl Deck {
         }
     }
 
+    #[cfg(test)]
     pub fn from_draw_order(draw_order: impl IntoIterator<Item = Card>) -> Self {
         let mut draw_pile = draw_order.into_iter().collect::<Vec<_>>();
         draw_pile.reverse();
@@ -62,6 +63,7 @@ impl Deck {
         }
     }
 
+    #[cfg(test)]
     pub fn with_draw_and_discard(
         draw_order: impl IntoIterator<Item = Card>,
         discard: impl IntoIterator<Item = Card>,
@@ -117,7 +119,8 @@ impl Deck {
         self.draw_pile.len() + self.discard_pile.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
         self.draw_pile.is_empty() && self.discard_pile.is_empty()
     }
 
@@ -137,6 +140,7 @@ impl Deck {
         }
     }
 
+    #[cfg(test)]
     pub fn draw_pile(&self) -> &[Card] {
         &self.draw_pile
     }
@@ -176,7 +180,8 @@ fn card_counts(cards: &[Card]) -> Vec<(Card, usize)> {
 mod tests {
     use std::collections::HashMap;
 
-    use super::*;
+    use super::Deck;
+    use crate::model::{BonusCard, Card};
 
     #[test]
     fn full_deck_has_expected_size() {

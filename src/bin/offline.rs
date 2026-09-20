@@ -1,27 +1,60 @@
-use std::env;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use flip_seven::model::{
-    SimulationSettings, SimulationSummary, StrategyKind, StrategyReport, all_strategy_kinds,
-    compare_head_to_head_strategies, compare_strategies, human_sweep_strategy_kinds,
-    strategy_label, strategy_slug,
+use clap::{Parser, ValueEnum};
+use flip_seven::simulation::{
+    ComparisonMode, SimulationConfig, SimulationReport, SimulationSummary, StrategyKind,
+    run_simulation,
 };
+use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Parser)]
+#[command(about = "Run offline Flip Seven strategy simulations")]
+struct Cli {
+    #[arg(long = "matches", alias = "rollouts")]
+    rollout_count: Option<usize>,
+    #[arg(long = "players")]
+    player_count: Option<usize>,
+    #[arg(long, value_parser = parse_strategies)]
+    strategies: Option<Vec<StrategyKind>>,
+    #[arg(long, value_enum)]
+    preset: Option<Preset>,
+    #[arg(long)]
+    decision_rollouts: Option<usize>,
+    #[arg(long = "seed")]
+    rng_seed: Option<u64>,
+    #[arg(long)]
+    target_score: Option<u32>,
+    #[arg(long)]
+    max_rounds: Option<u32>,
+    #[arg(long)]
+    min_matches: Option<usize>,
+    #[arg(long)]
+    max_matches: Option<usize>,
+    #[arg(long)]
+    win_ci_width: Option<f64>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+    format: OutputFormat,
+    #[arg(long)]
+    no_mirrored_seating: bool,
+    #[arg(long)]
+    single_thread: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum OutputFormat {
     Table,
     Csv,
     Json,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Preset {
     HumanSweep,
     MaxWinStaticCalibration,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 struct Benchmark {
     elapsed_seconds: f64,
     matches_per_second: f64,
@@ -29,106 +62,112 @@ struct Benchmark {
     decisions_per_second: f64,
 }
 
-fn main() -> ExitCode {
-    let mut settings = SimulationSettings::default();
-    let mut format = OutputFormat::Table;
-    let mut preset = None;
-    let mut args = env::args().skip(1);
+#[derive(Serialize)]
+struct JsonOutput<'a> {
+    settings: &'a SimulationConfig,
+    benchmark: Benchmark,
+    total_match_runs: usize,
+    completed_match_runs: usize,
+    round_limited_match_runs: usize,
+    total_rounds: u64,
+    total_decisions: u64,
+    summaries: &'a [SimulationSummary],
+}
 
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--help" | "-h" => {
-                print_usage();
-                return ExitCode::SUCCESS;
-            }
-            "--matches" | "--rollouts" => {
-                settings.rollout_count = parse_next(&arg, &mut args);
-            }
-            "--players" => {
-                settings.player_count = parse_next(&arg, &mut args);
-            }
-            "--strategies" => {
-                let value: String = parse_next(&arg, &mut args);
-                settings.strategies = parse_strategies(&value).unwrap_or_else(|error| {
-                    eprintln!("{error}");
-                    std::process::exit(2);
-                });
-            }
-            "--preset" => {
-                let value: String = parse_next(&arg, &mut args);
-                preset = Some(parse_preset(&value).unwrap_or_else(|| {
-                    eprintln!("Invalid preset: {value}");
-                    std::process::exit(2);
-                }));
-            }
-            "--decision-rollouts" => {
-                settings.decision_rollouts = parse_next(&arg, &mut args);
-            }
-            "--seed" => {
-                settings.rng_seed = parse_next(&arg, &mut args);
-            }
-            "--target-score" => {
-                settings.target_score = parse_next(&arg, &mut args);
-            }
-            "--max-rounds" => {
-                settings.max_rounds = parse_next(&arg, &mut args);
-            }
-            "--min-matches" => {
-                settings.min_matches = Some(parse_next(&arg, &mut args));
-            }
-            "--max-matches" => {
-                settings.max_matches = Some(parse_next(&arg, &mut args));
-            }
-            "--win-ci-width" => {
-                settings.win_ci_width = Some(parse_next(&arg, &mut args));
-            }
-            "--format" => {
-                let value: String = parse_next(&arg, &mut args);
-                format = parse_format(&value).unwrap_or_else(|| {
-                    eprintln!("Invalid format: {value}");
-                    std::process::exit(2);
-                });
-            }
-            "--no-mirrored-seating" => {
-                settings.mirrored_seating = false;
-            }
-            "--single-thread" => {
-                settings.parallel = false;
-            }
-            unknown => {
-                eprintln!("Unknown argument: {unknown}");
-                print_usage();
-                return ExitCode::from(2);
-            }
+#[derive(Serialize)]
+struct CsvRow {
+    strategy: String,
+    matches: usize,
+    completed_matches: usize,
+    round_limited_matches: usize,
+    wins: usize,
+    win_rate: f64,
+    win_ci_lower: f64,
+    win_ci_upper: f64,
+    average_final_score: f64,
+    final_score_standard_error: f64,
+    average_rounds: f64,
+    bust_rate: f64,
+    average_pre_draw_bust_risk: f64,
+    flip_seven_rate: f64,
+    points_per_round: f64,
+    total_match_runs: usize,
+    completed_match_runs: usize,
+    round_limited_match_runs: usize,
+    total_rounds: u64,
+    total_decisions: u64,
+    elapsed_seconds: f64,
+    matches_per_second: f64,
+    rounds_per_second: f64,
+    decisions_per_second: f64,
+}
+
+fn main() -> ExitCode {
+    match execute(Cli::parse()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::from(2)
         }
     }
+}
 
-    if preset == Some(Preset::HumanSweep) {
-        settings.player_count = 2;
-        settings.strategies = human_sweep_strategy_kinds();
-        settings.mirrored_seating = true;
-    } else if preset == Some(Preset::MaxWinStaticCalibration) {
-        settings.player_count = 4;
-        settings.strategies = vec![
-            StrategyKind::MaxWinStatic,
-            StrategyKind::MaxRoundEv,
-            StrategyKind::Balanced,
-            StrategyKind::Aggressive,
-            StrategyKind::MaxWinProbability,
-            StrategyKind::StayAtScore(27),
-            StrategyKind::StayAtScore(28),
-            StrategyKind::StayAtScore(29),
-            StrategyKind::StayAtScore(25),
-        ];
-        settings.mirrored_seating = true;
+fn execute(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = SimulationConfig::default();
+    if let Some(value) = cli.rollout_count {
+        config.rollout_count = value;
+    }
+    if let Some(value) = cli.player_count {
+        config.player_count = value;
+    }
+    if let Some(value) = cli.strategies {
+        config.strategies = value;
+    }
+    if let Some(value) = cli.decision_rollouts {
+        config.decision_rollouts = value;
+    }
+    if let Some(value) = cli.rng_seed {
+        config.rng_seed = value;
+    }
+    if let Some(value) = cli.target_score {
+        config.target_score = value;
+    }
+    if let Some(value) = cli.max_rounds {
+        config.max_rounds = value;
+    }
+    config.min_matches = cli.min_matches;
+    config.max_matches = cli.max_matches;
+    config.win_ci_width = cli.win_ci_width;
+    config.mirrored_seating = !cli.no_mirrored_seating;
+    config.parallel = !cli.single_thread;
+
+    match cli.preset {
+        Some(Preset::HumanSweep) => {
+            config.comparison_mode = ComparisonMode::HeadToHead;
+            config.player_count = 2;
+            config.strategies = StrategyKind::human_sweep_catalog();
+            config.mirrored_seating = true;
+        }
+        Some(Preset::MaxWinStaticCalibration) => {
+            config.player_count = 4;
+            config.strategies = vec![
+                StrategyKind::MaxWinStatic,
+                StrategyKind::MaxRoundEv,
+                StrategyKind::Balanced,
+                StrategyKind::Aggressive,
+                StrategyKind::MaxWinProbability,
+                StrategyKind::StayAtScore(27),
+                StrategyKind::StayAtScore(28),
+                StrategyKind::StayAtScore(29),
+                StrategyKind::StayAtScore(25),
+            ];
+            config.mirrored_seating = true;
+        }
+        None => {}
     }
 
     let started = Instant::now();
-    let report = if preset == Some(Preset::HumanSweep) {
-        compare_head_to_head_strategies(settings)
-    } else {
-        compare_strategies(settings)
-    };
+    let report = run_simulation(config)?;
     let elapsed_seconds = started.elapsed().as_secs_f64().max(f64::EPSILON);
     let benchmark = Benchmark {
         elapsed_seconds,
@@ -136,270 +175,141 @@ fn main() -> ExitCode {
         rounds_per_second: report.total_rounds as f64 / elapsed_seconds,
         decisions_per_second: report.total_decisions as f64 / elapsed_seconds,
     };
-
-    match format {
-        OutputFormat::Table => print_table_report(&report, benchmark),
-        OutputFormat::Csv => print_csv_report(&report, benchmark),
-        OutputFormat::Json => print_json_report(&report, benchmark),
+    match cli.format {
+        OutputFormat::Table => print_table(&report, benchmark),
+        OutputFormat::Csv => print_csv(&report, benchmark)?,
+        OutputFormat::Json => serde_json::to_writer_pretty(
+            std::io::stdout(),
+            &JsonOutput {
+                settings: &report.settings,
+                benchmark,
+                total_match_runs: report.total_match_runs,
+                completed_match_runs: report.completed_match_runs,
+                round_limited_match_runs: report.round_limited_match_runs,
+                total_rounds: report.total_rounds,
+                total_decisions: report.total_decisions,
+                summaries: &report.summaries,
+            },
+        )?,
     }
-    ExitCode::SUCCESS
-}
-
-fn parse_next<T>(flag: &str, args: &mut impl Iterator<Item = String>) -> T
-where
-    T: std::str::FromStr,
-    T::Err: std::fmt::Display,
-{
-    let value = args.next().unwrap_or_else(|| {
-        eprintln!("Missing value for {flag}");
-        std::process::exit(2);
-    });
-
-    value.parse::<T>().unwrap_or_else(|error| {
-        eprintln!("Invalid value for {flag}: {value} ({error})");
-        std::process::exit(2);
-    })
+    Ok(())
 }
 
 fn parse_strategies(value: &str) -> Result<Vec<StrategyKind>, String> {
     let strategies = value
         .split(',')
         .filter(|part| !part.trim().is_empty())
-        .map(str::parse::<StrategyKind>)
+        .map(str::parse)
         .collect::<Result<Vec<_>, _>>()?;
-
     if strategies.is_empty() {
-        return Err("--strategies must include at least one strategy".to_owned());
-    }
-
-    Ok(strategies)
-}
-
-fn parse_format(value: &str) -> Option<OutputFormat> {
-    match value {
-        "table" => Some(OutputFormat::Table),
-        "csv" => Some(OutputFormat::Csv),
-        "json" => Some(OutputFormat::Json),
-        _ => None,
+        Err("at least one strategy is required".to_owned())
+    } else {
+        Ok(strategies)
     }
 }
 
-fn parse_preset(value: &str) -> Option<Preset> {
-    match value {
-        "human-sweep" => Some(Preset::HumanSweep),
-        "max-win-static-calibration" => Some(Preset::MaxWinStaticCalibration),
-        _ => None,
-    }
-}
-
-fn print_usage() {
-    let strategies = all_strategy_kinds()
-        .iter()
-        .map(|strategy| strategy_slug(*strategy))
-        .collect::<Vec<_>>()
-        .join(",");
+fn print_table(report: &SimulationReport, benchmark: Benchmark) {
+    println!("Offline Flip Seven strategy comparison");
     println!(
-        "\
-Usage: cargo run --release --bin offline -- [options]
-
-Runs offline Flip 7 strategy simulations against the shared model.
-
-Options:
-  --matches <n>            Base matches to simulate per seating rotation
-  --rollouts <n>           Alias for --matches
-  --players <n>            Player count
-  --strategies <list>      Comma-separated strategies. Available: {strategies}
-  --preset <name>          Run a named benchmark preset: human-sweep, max-win-static-calibration
-  --decision-rollouts <n>  Rollouts used for each rollout-backed decision
-  --seed <n>               RNG seed
-  --target-score <n>       Score needed to win
-  --max-rounds <n>         Round cap per match
-  --min-matches <n>        Convergence mode starting match count
-  --max-matches <n>        Convergence mode maximum match count
-  --win-ci-width <n>       Stop convergence when widest 95% win CI is at or below n
-  --format <table|csv|json>
-  --no-mirrored-seating    Disable default seat rotations
-  --single-thread          Disable parallel match execution
-  -h, --help               Show this help"
+        "match runs: {} | completed: {} | round limit: {} | players: {} | seed: {}",
+        report.total_match_runs,
+        report.completed_match_runs,
+        report.round_limited_match_runs,
+        report.settings.player_count,
+        report.settings.rng_seed
     );
-}
-
-fn print_table_report(report: &StrategyReport, benchmark: Benchmark) {
-    println!("Offline Flip 7 strategy comparison");
-    println!("base matches: {}", report.settings.rollout_count);
-    println!("match runs: {}", report.total_match_runs);
-    println!("players: {}", report.settings.player_count);
     println!(
-        "strategies: {}",
-        report
-            .settings
-            .strategies
-            .iter()
-            .map(|strategy| strategy_slug(*strategy))
-            .collect::<Vec<_>>()
-            .join(",")
+        "elapsed: {:.3}s | matches/sec: {:.0}",
+        benchmark.elapsed_seconds, benchmark.matches_per_second
     );
-    println!("mirrored seating: {}", report.settings.mirrored_seating);
-    println!("decision rollouts: {}", report.settings.decision_rollouts);
-    println!("seed: {}", report.settings.rng_seed);
-    println!("target score: {}", report.settings.target_score);
-    println!("max rounds: {}", report.settings.max_rounds);
     println!(
-        "elapsed: {:.3}s | matches/sec: {:.0} | rounds/sec: {:.0} | decisions/sec: {:.0}",
-        benchmark.elapsed_seconds,
-        benchmark.matches_per_second,
-        benchmark.rounds_per_second,
-        benchmark.decisions_per_second
+        "{:<16} {:>8} {:>8} {:>8} {:>8} {:>8} {:>12} {:>9} {:>9}",
+        "Strategy", "Matches", "Done", "Limited", "Wins", "Win%", "Final", "Bust", "Pts/R"
     );
-    println!();
-    println!(
-        "{:<14} {:>8} {:>8} {:>8} {:>16} {:>12} {:>10} {:>9} {:>9} {:>9} {:>10}",
-        "Strategy",
-        "Matches",
-        "Wins",
-        "Win%",
-        "95% CI",
-        "Final",
-        "SE",
-        "Rounds",
-        "Bust",
-        "Flip 7",
-        "Pts/R"
-    );
-    println!("{}", "-".repeat(130));
-
     for summary in &report.summaries {
-        print_table_summary(summary);
+        print_table_row(summary);
     }
 }
 
-fn print_table_summary(summary: &SimulationSummary) {
+fn print_table_row(summary: &SimulationSummary) {
+    let win_percent = if summary.completed_matches == 0 {
+        "-".to_owned()
+    } else {
+        format!("{:.1}%", summary.win_rate * 100.0)
+    };
     println!(
-        "{:<14} {:>8} {:>8} {:>7.1}% {:>6.1}-{:<6.1} {:>12.1} {:>10.2} {:>9.1} {:>8.1}% {:>8.1}% {:>10.1}",
-        strategy_label(summary.strategy),
+        "{:<16} {:>8} {:>8} {:>8} {:>8} {:>8} {:>12.1} {:>8.1}% {:>9.1}",
+        summary.strategy.label(),
         summary.matches,
+        summary.completed_matches,
+        summary.round_limited_matches,
         summary.wins,
-        summary.win_rate * 100.0,
-        summary.win_ci_lower * 100.0,
-        summary.win_ci_upper * 100.0,
+        win_percent,
         summary.average_final_score,
-        summary.final_score_standard_error,
-        summary.average_rounds_to_finish,
         summary.bust_rate * 100.0,
-        summary.flip_seven_rate * 100.0,
         summary.average_points_per_round
     );
 }
 
-fn print_csv_report(report: &StrategyReport, benchmark: Benchmark) {
-    println!(
-        "strategy,matches,wins,win_rate,win_ci_lower,win_ci_upper,average_final_score,final_score_standard_error,average_rounds,bust_rate,average_pre_draw_bust_risk,flip_seven_rate,points_per_round,total_match_runs,total_rounds,total_decisions,elapsed_seconds,matches_per_second,rounds_per_second,decisions_per_second"
-    );
+fn print_csv(report: &SimulationReport, benchmark: Benchmark) -> csv::Result<()> {
+    let mut writer = csv::Writer::from_writer(std::io::stdout());
     for summary in &report.summaries {
-        println!(
-            "{},{},{},{:.8},{:.8},{:.8},{:.4},{:.4},{:.4},{:.8},{:.8},{:.8},{:.4},{},{},{},{:.6},{:.4},{:.4},{:.4}",
-            strategy_slug(summary.strategy),
-            summary.matches,
-            summary.wins,
-            summary.win_rate,
-            summary.win_ci_lower,
-            summary.win_ci_upper,
-            summary.average_final_score,
-            summary.final_score_standard_error,
-            summary.average_rounds_to_finish,
-            summary.bust_rate,
-            summary.average_pre_draw_bust_risk,
-            summary.flip_seven_rate,
-            summary.average_points_per_round,
-            report.total_match_runs,
-            report.total_rounds,
-            report.total_decisions,
-            benchmark.elapsed_seconds,
-            benchmark.matches_per_second,
-            benchmark.rounds_per_second,
-            benchmark.decisions_per_second
-        );
+        writer.serialize(CsvRow {
+            strategy: summary.strategy.slug(),
+            matches: summary.matches,
+            completed_matches: summary.completed_matches,
+            round_limited_matches: summary.round_limited_matches,
+            wins: summary.wins,
+            win_rate: summary.win_rate,
+            win_ci_lower: summary.win_ci_lower,
+            win_ci_upper: summary.win_ci_upper,
+            average_final_score: summary.average_final_score,
+            final_score_standard_error: summary.final_score_standard_error,
+            average_rounds: summary.average_rounds_to_finish,
+            bust_rate: summary.bust_rate,
+            average_pre_draw_bust_risk: summary.average_pre_draw_bust_risk,
+            flip_seven_rate: summary.flip_seven_rate,
+            points_per_round: summary.average_points_per_round,
+            total_match_runs: report.total_match_runs,
+            completed_match_runs: report.completed_match_runs,
+            round_limited_match_runs: report.round_limited_match_runs,
+            total_rounds: report.total_rounds,
+            total_decisions: report.total_decisions,
+            elapsed_seconds: benchmark.elapsed_seconds,
+            matches_per_second: benchmark.matches_per_second,
+            rounds_per_second: benchmark.rounds_per_second,
+            decisions_per_second: benchmark.decisions_per_second,
+        })?;
     }
+    writer.flush()?;
+    Ok(())
 }
 
-fn print_json_report(report: &StrategyReport, benchmark: Benchmark) {
-    println!("{{");
-    println!("  \"settings\": {{");
-    println!("    \"matches\": {},", report.settings.rollout_count);
-    println!("    \"players\": {},", report.settings.player_count);
-    println!(
-        "    \"strategies\": [{}],",
-        json_strategy_list(&report.settings.strategies)
-    );
-    println!(
-        "    \"mirrored_seating\": {},",
-        report.settings.mirrored_seating
-    );
-    println!(
-        "    \"decision_rollouts\": {},",
-        report.settings.decision_rollouts
-    );
-    println!("    \"seed\": {},", report.settings.rng_seed);
-    println!("    \"target_score\": {},", report.settings.target_score);
-    println!("    \"max_rounds\": {}", report.settings.max_rounds);
-    println!("  }},");
-    println!("  \"benchmark\": {{");
-    println!("    \"elapsed_seconds\": {:.6},", benchmark.elapsed_seconds);
-    println!(
-        "    \"matches_per_second\": {:.4},",
-        benchmark.matches_per_second
-    );
-    println!(
-        "    \"rounds_per_second\": {:.4},",
-        benchmark.rounds_per_second
-    );
-    println!(
-        "    \"decisions_per_second\": {:.4},",
-        benchmark.decisions_per_second
-    );
-    println!("    \"total_match_runs\": {},", report.total_match_runs);
-    println!("    \"total_rounds\": {},", report.total_rounds);
-    println!("    \"total_decisions\": {}", report.total_decisions);
-    println!("  }},");
-    println!("  \"summaries\": [");
-    for (index, summary) in report.summaries.iter().enumerate() {
-        let comma = if index + 1 == report.summaries.len() {
-            ""
-        } else {
-            ","
-        };
-        println!(
-            "    {{\"strategy\":\"{}\",\"matches\":{},\"wins\":{},\"win_rate\":{:.8},\"win_ci_lower\":{:.8},\"win_ci_upper\":{:.8},\"average_final_score\":{:.4},\"final_score_standard_error\":{:.4},\"average_rounds\":{:.4},\"bust_rate\":{:.8},\"average_pre_draw_bust_risk\":{:.8},\"flip_seven_rate\":{:.8},\"points_per_round\":{:.4},\"seat_exposure\":[{}]}}{}",
-            strategy_slug(summary.strategy),
-            summary.matches,
-            summary.wins,
-            summary.win_rate,
-            summary.win_ci_lower,
-            summary.win_ci_upper,
-            summary.average_final_score,
-            summary.final_score_standard_error,
-            summary.average_rounds_to_finish,
-            summary.bust_rate,
-            summary.average_pre_draw_bust_risk,
-            summary.flip_seven_rate,
-            summary.average_points_per_round,
-            summary
-                .seat_exposure
-                .iter()
-                .map(usize::to_string)
-                .collect::<Vec<_>>()
-                .join(","),
-            comma
-        );
-    }
-    println!("  ]");
-    println!("}}");
-}
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
 
-fn json_strategy_list(strategies: &[StrategyKind]) -> String {
-    strategies
-        .iter()
-        .map(|strategy| format!("\"{}\"", strategy_slug(*strategy)))
-        .collect::<Vec<_>>()
-        .join(",")
+    use super::{Cli, OutputFormat};
+
+    #[test]
+    fn parses_existing_flags() {
+        let cli = Cli::try_parse_from([
+            "offline",
+            "--matches",
+            "2",
+            "--players",
+            "3",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        assert_eq!(cli.rollout_count, Some(2));
+        assert_eq!(cli.player_count, Some(3));
+        assert_eq!(cli.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn rejects_unknown_strategy() {
+        assert!(Cli::try_parse_from(["offline", "--strategies", "nope"]).is_err());
+    }
 }

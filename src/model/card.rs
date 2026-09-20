@@ -16,25 +16,7 @@ pub enum BonusCard {
 }
 
 impl Card {
-    pub const MIN_NUMBER: u8 = 0;
     pub const MAX_NUMBER: u8 = 12;
-
-    pub fn number(value: u8) -> Option<Self> {
-        (Self::MIN_NUMBER..=Self::MAX_NUMBER)
-            .contains(&value)
-            .then_some(Self::Number(value))
-    }
-
-    pub fn label(self) -> String {
-        match self {
-            Self::Number(value) => value.to_string(),
-            Self::Bonus(BonusCard::Plus(value)) => format!("+{value}"),
-            Self::Bonus(BonusCard::Double) => "x2".to_owned(),
-            Self::SecondChance => "Second Chance".to_owned(),
-            Self::FlipThree => "Flip Three".to_owned(),
-            Self::Freeze => "Freeze".to_owned(),
-        }
-    }
 
     pub fn short_label(self) -> String {
         match self {
@@ -47,6 +29,7 @@ impl Card {
         }
     }
 
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
     pub fn is_number(self) -> bool {
         matches!(self, Self::Number(_))
     }

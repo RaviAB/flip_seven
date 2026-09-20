@@ -1,232 +1,209 @@
-use crate::model::{Card, PlayerStatus};
+use crate::model::{Card, PlayerId, PlayerStatus};
 
-use super::card_resolution::FlipSevenBonus;
-use super::events::{ActionChoice, DealOutcome, PendingAction, SpecialAction};
+use super::events::{
+    DealSource, GameError, GameEvent, GameResult, PendingStep, RoundEndReason, SpecialAction,
+};
 use super::state::GameState;
+use crate::model::ScoreBonus;
 
 impl GameState {
-    pub fn start_next_round(&mut self) -> DealOutcome {
-        if !self.round_over {
-            return DealOutcome::RoundOver;
-        }
-
+    pub(crate) fn reset(&mut self, player_count: usize) -> GameResult {
         self.save_snapshot();
-        for player in &mut self.players {
-            self.deck.discard_many(player.reset_round());
+        let replacement = Self::new(player_count);
+        self.live = replacement.live;
+        Ok(GameEvent::Reset { player_count })
+    }
+
+    pub(crate) fn start_next_round(&mut self) -> GameResult {
+        if !self.live.round_over {
+            return Err(GameError::RoundInProgress);
         }
-        self.pending_action = None;
-        self.queued_actions.clear();
-        self.flip_seven_player_id = None;
-        self.round_over = false;
-        self.round_number += 1;
+        self.save_snapshot();
+        let discarded = self
+            .live
+            .players
+            .iter_mut()
+            .flat_map(|player| player.reset_round())
+            .collect::<Vec<_>>();
+        self.live.deck.discard_many(discarded);
+        self.live.pending_resolution = None;
+        self.live.flip_seven_player_id = None;
+        self.live.round_over = false;
+        self.live.round_number += 1;
         self.reset_current_round_scoreboard();
-        if !self.players.is_empty() {
-            self.round_start_player_index =
-                (self.round_start_player_index + 1) % self.players.len();
+        if !self.live.players.is_empty() {
+            self.live.round_start_player_index =
+                (self.live.round_start_player_index + 1) % self.live.players.len();
         }
-        self.current_player_index = self.round_start_player_index;
-        self.advance_to_next_active_player_from(self.round_start_player_index);
-
-        DealOutcome::NewRoundStarted
+        self.live.turn_player_index = self.live.round_start_player_index;
+        self.advance_to_next_active_player_from(self.live.round_start_player_index);
+        Ok(GameEvent::RoundStarted {
+            round_number: self.live.round_number,
+        })
     }
 
-    pub fn reshuffle_discard_into_draw_pile(&mut self) -> DealOutcome {
-        if self.deck.discard_pile_count() == 0 {
-            return DealOutcome::NoDiscardToReshuffle;
+    pub(crate) fn reshuffle_discard(&mut self) -> GameResult {
+        if self.live.deck.discard_pile_count() == 0 {
+            return Err(GameError::NoDiscard);
         }
-
         self.save_snapshot();
-        let cards_moved = self.deck.reshuffle_discard_into_draw_pile();
-        DealOutcome::DiscardReshuffled { cards_moved }
+        let cards_moved = self.live.deck.reshuffle_discard_into_draw_pile();
+        Ok(GameEvent::Reshuffled { cards_moved })
     }
 
-    pub fn deal_next_card(&mut self) -> DealOutcome {
-        if self.round_over {
-            return DealOutcome::RoundOver;
-        }
-
-        if let Some(pending_action) = &self.pending_action {
-            return DealOutcome::WaitingForTarget {
-                action: pending_action.action,
-            };
-        }
-
-        if self.players.is_empty() {
-            return DealOutcome::NoPlayers;
-        }
-
-        let Some(player_index) = self.next_active_player_index_from(self.current_player_index)
-        else {
-            return self.end_round("No active players remain.".to_owned());
-        };
-
-        let snapshot = self.snapshot();
-        if self.deck.next_draw_pool_counts().is_empty() {
-            return DealOutcome::DeckEmpty;
-        }
-
-        self.push_snapshot(snapshot);
-        self.current_player_index = player_index;
-        self.record_pre_draw_telemetry(player_index);
-        let Some(card) = self.deck.draw() else {
-            return DealOutcome::DeckEmpty;
-        };
-
-        self.apply_card_to_current_player(card)
+    #[allow(dead_code)]
+    pub(crate) fn deal_next_card(&mut self) -> GameResult {
+        self.deal_card(None, DealSource::DrawPile)
     }
 
-    pub fn deal_selected_card(&mut self, card: Card) -> DealOutcome {
-        if self.round_over {
-            return DealOutcome::RoundOver;
-        }
+    pub(crate) fn deal_selected_card(&mut self, card: Card) -> GameResult {
+        self.deal_card(Some(card), DealSource::Selected)
+    }
 
-        if let Some(pending_action) = self.pending_action.clone() {
-            if pending_action.awaiting_selected_draws() {
-                return self.deal_selected_flip_three_card(card, pending_action);
+    fn deal_card(&mut self, selected: Option<Card>, source: DealSource) -> GameResult {
+        if self.live.round_over {
+            return Err(GameError::RoundOver);
+        }
+        if let Some(pending) = self.pending_action() {
+            if pending.awaiting_selected_draws()
+                && let Some(card) = selected
+            {
+                return self.deal_selected_flip_three_card(card);
             }
-
-            return DealOutcome::WaitingForTarget {
-                action: pending_action.action,
-            };
+            return Err(GameError::PendingTarget {
+                action: pending.action(),
+            });
         }
-
-        if self.players.is_empty() {
-            return DealOutcome::NoPlayers;
+        if self.live.players.is_empty() {
+            return Err(GameError::NoPlayers);
         }
-
-        let Some(player_index) = self.next_active_player_index_from(self.current_player_index)
+        let Some(player_index) = self.next_active_player_index_from(self.live.turn_player_index)
         else {
-            return self.end_round("No active players remain.".to_owned());
+            return Ok(self.end_round(RoundEndReason::NoActivePlayers));
         };
-
-        let snapshot = self.snapshot();
-        if !self
-            .deck
-            .next_draw_pool_counts()
-            .iter()
-            .any(|(candidate, _)| *candidate == card)
-        {
-            return DealOutcome::SelectedCardUnavailable;
+        if let Some(card) = selected {
+            if !self
+                .live
+                .deck
+                .next_draw_pool_counts()
+                .iter()
+                .any(|(candidate, _)| *candidate == card)
+            {
+                return Err(GameError::CardUnavailable { card });
+            }
+        } else if self.live.deck.next_draw_pool_counts().is_empty() {
+            return Err(GameError::EmptyDeck);
         }
 
-        self.push_snapshot(snapshot);
-        self.current_player_index = player_index;
+        self.save_snapshot();
+        self.live.turn_player_index = player_index;
         self.record_pre_draw_telemetry(player_index);
-        let Some(card) = self.deck.draw_selected(card) else {
-            return DealOutcome::SelectedCardUnavailable;
-        };
-
-        self.apply_card_to_current_player(card)
+        let card = match selected {
+            Some(card) => self.live.deck.draw_selected(card),
+            None => self.live.deck.draw(),
+        }
+        .ok_or_else(|| {
+            selected.map_or(GameError::EmptyDeck, |card| GameError::CardUnavailable {
+                card,
+            })
+        })?;
+        Ok(self.apply_card_to_current_player(card, source))
     }
 
-    pub fn stay_current_player(&mut self) -> DealOutcome {
-        if self.round_over {
-            return DealOutcome::RoundOver;
+    pub(crate) fn stay_current_player(&mut self) -> GameResult {
+        if self.live.round_over {
+            return Err(GameError::RoundOver);
         }
-        if let Some(pending_action) = &self.pending_action {
-            return DealOutcome::WaitingForTarget {
-                action: pending_action.action,
-            };
+        if let Some(pending) = self.pending_action() {
+            return Err(GameError::PendingTarget {
+                action: pending.action(),
+            });
         }
-        let Some(player_index) = self.next_active_player_index_from(self.current_player_index)
+        let Some(player_index) = self.next_active_player_index_from(self.live.turn_player_index)
         else {
-            return self.end_round("No active players remain.".to_owned());
+            return Ok(self.end_round(RoundEndReason::NoActivePlayers));
         };
 
         self.save_snapshot();
-        self.current_player_index = player_index;
-        let player_id = self.players[player_index].id();
-        let player_name = self.players[player_index].name().to_owned();
-        self.finish_player(player_index, PlayerStatus::Stayed, FlipSevenBonus::No);
+        self.live.turn_player_index = player_index;
+        let player_id = self.live.players[player_index].id();
+        self.finish_player(player_index, PlayerStatus::Stayed, ScoreBonus::None);
         self.advance_to_next_active_player_after(player_id);
-
         if self.no_active_players() {
-            self.end_round("All players are done for the round.".to_owned())
+            Ok(self.end_round(RoundEndReason::AllPlayersDone))
         } else {
-            DealOutcome::Stayed {
-                player_id,
-                player_name,
-            }
+            Ok(GameEvent::Stayed { player_id })
         }
     }
 
-    pub fn resolve_pending_action(&mut self, choice: ActionChoice) -> DealOutcome {
-        if self.round_over {
-            return DealOutcome::RoundOver;
+    pub(crate) fn choose_target(&mut self, target_player_id: PlayerId) -> GameResult {
+        if self.live.round_over {
+            return Err(GameError::RoundOver);
         }
-
-        let Some(pending_action) = self.pending_action.clone() else {
-            return DealOutcome::InvalidTarget;
+        let Some(pending) = self.pending_action() else {
+            return Err(GameError::InvalidTarget);
         };
-
-        let ActionChoice::Player(target_player_id) = choice;
+        let Some((action, source_player_id, _)) = pending.target_choice() else {
+            return Err(GameError::InvalidTarget);
+        };
         let Some(target_index) = self.player_index(target_player_id) else {
-            return DealOutcome::InvalidTarget;
+            return Err(GameError::InvalidTarget);
         };
-
-        if !self.players[target_index].is_active_in_round() {
-            return DealOutcome::InvalidTarget;
+        if !self.legal_pending_targets().contains(&target_player_id) {
+            return Err(GameError::InvalidTarget);
         }
 
         self.save_snapshot();
-        self.pending_action = None;
-        let mut notes = Vec::new();
-        match pending_action.action {
+        let resolution = self
+            .live
+            .pending_resolution
+            .as_mut()
+            .expect("pending step requires a resolution");
+        resolution.pop_front();
+        match action {
+            SpecialAction::SecondChance => {
+                self.live.players[target_index].receive_card(Card::SecondChance);
+                self.complete_pending_if_empty();
+                if self.no_active_players() {
+                    return Ok(self.end_round(RoundEndReason::AllPlayersDone));
+                }
+                Ok(GameEvent::TargetResolved {
+                    action,
+                    target_player_id,
+                })
+            }
             SpecialAction::Freeze => {
-                self.finish_player(target_index, PlayerStatus::Frozen, FlipSevenBonus::No);
-                notes.push(format!("{} is frozen.", self.players[target_index].name()));
+                self.finish_player(target_index, PlayerStatus::Frozen, ScoreBonus::None);
+                self.complete_pending_if_empty();
+                if self.no_active_players() {
+                    return Ok(self.end_round(RoundEndReason::AllPlayersDone));
+                }
+                Ok(GameEvent::TargetResolved {
+                    action,
+                    target_player_id,
+                })
             }
             SpecialAction::FlipThree => {
-                self.current_player_index = target_index;
-                self.pending_action = Some(PendingAction {
-                    target_player_id: Some(target_player_id),
-                    remaining_draws: 3,
-                    ..pending_action
-                });
-                return DealOutcome::FlipThreeTargetSelected {
+                let checkpoint = resolution.checkpoint();
+                resolution.push_immediate(PendingStep::FlipThreeDraws {
+                    source_player_id,
                     target_player_id,
-                    target_player_name: self.players[target_index].name().to_owned(),
                     remaining_draws: 3,
-                };
+                    queue_checkpoint: checkpoint,
+                });
+                Ok(GameEvent::FlipThreeStarted {
+                    target_player_id,
+                    remaining_draws: 3,
+                })
             }
-        }
-
-        if self.players[target_index].has_flip_seven() {
-            return self.end_round(format!("{} hit Flip 7.", self.players[target_index].name()));
-        }
-
-        self.advance_to_next_active_player_after(pending_action.resume_after_player_id);
-
-        if self.no_active_players() {
-            return self.end_round("All players are done for the round.".to_owned());
-        }
-
-        self.activate_next_queued_action();
-
-        DealOutcome::SpecialResolved {
-            action: pending_action.action,
-            target_player_id,
-            target_player_name: self.players[target_index].name().to_owned(),
-            drawn_cards: Vec::new(),
-            notes,
         }
     }
 
-    pub fn undo(&mut self) -> DealOutcome {
-        let Some(snapshot) = self.history.pop() else {
-            return DealOutcome::NothingToUndo;
+    pub(crate) fn undo(&mut self) -> GameResult {
+        let Some(snapshot) = self.pop_undo() else {
+            return Err(GameError::NothingToUndo);
         };
-
-        self.players = snapshot.players;
-        self.deck = snapshot.deck;
-        self.current_player_index = snapshot.current_player_index;
-        self.pending_action = snapshot.pending_action;
-        self.queued_actions = snapshot.queued_actions;
-        self.score_board = snapshot.score_board;
-        self.round_number = snapshot.round_number;
-        self.round_start_player_index = snapshot.round_start_player_index;
-        self.round_over = snapshot.round_over;
-        self.flip_seven_player_id = snapshot.flip_seven_player_id;
-        DealOutcome::UndoApplied
+        self.live = snapshot;
+        Ok(GameEvent::UndoApplied)
     }
 }

@@ -1,4 +1,6 @@
-use crate::model::{BonusCard, Card, Player, PlayerId, round_score_for_cards};
+#[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+use crate::model::PlayerId;
+use crate::model::{BonusCard, Card, Player, ScoreBonus, round_score_for_cards};
 
 use super::state::GameState;
 
@@ -32,8 +34,8 @@ pub struct ExpectedValueDetail {
 }
 
 impl GameState {
-    pub fn current_player_odds(&self) -> Option<DrawOdds> {
-        if let Some(pending_action) = &self.pending_action
+    pub(crate) fn current_player_odds(&self) -> Option<DrawOdds> {
+        if let Some(pending_action) = self.pending_action()
             && pending_action.awaiting_selected_draws()
             && let Some(target_player_id) = pending_action.target_player_id()
             && let Some(target_index) = self.player_index(target_player_id)
@@ -45,24 +47,25 @@ impl GameState {
             .and_then(|index| self.draw_odds_for_player_index(index))
     }
 
-    pub fn draw_odds_for_player(&self, player_id: PlayerId) -> Option<DrawOdds> {
+    #[cfg(all(feature = "simulation", not(target_arch = "wasm32")))]
+    pub(crate) fn draw_odds_for_player(&self, player_id: PlayerId) -> Option<DrawOdds> {
         self.player_index(player_id)
             .and_then(|index| self.draw_odds_for_player_index(index))
     }
 
     pub(super) fn draw_odds_for_player_index(&self, player_index: usize) -> Option<DrawOdds> {
-        let player = self.players.get(player_index)?;
-        if self.round_over || !player.is_active_in_round() {
+        let player = self.live.players.get(player_index)?;
+        if self.live.round_over || !player.is_active_in_round() {
             return None;
         }
 
-        let pool_counts = self.deck.next_draw_pool_counts();
+        let pool_counts = self.live.deck.next_draw_pool_counts();
         let next_pool_size = pool_counts.iter().map(|(_, count)| *count).sum::<usize>();
         if next_pool_size == 0 {
             return Some(DrawOdds {
                 next_pool_size: 0,
-                current_score: player.round_score(false),
-                expected_score_after_draw: player.round_score(false) as f64,
+                current_score: player.round_score(ScoreBonus::None),
+                expected_score_after_draw: player.round_score(ScoreBonus::None) as f64,
                 expected_score_delta: 0.0,
                 bust_probability: 0.0,
                 flip_seven_probability: 0.0,
@@ -71,7 +74,7 @@ impl GameState {
             });
         }
 
-        let current_score = player.round_score(false);
+        let current_score = player.round_score(ScoreBonus::None);
         let has_second_chance = player.has_second_chance();
         let distinct_numbers = player.distinct_number_count();
         let mut expected_score_after_draw = 0.0;
@@ -137,21 +140,28 @@ fn score_after_one_draw(player: &Player, card: Card) -> u32 {
                     {
                         cards.remove(index);
                     }
-                    round_score_for_cards(&cards, false)
+                    round_score_for_cards(&cards, ScoreBonus::None)
                 } else {
                     0
                 }
             } else {
                 let mut cards = player.hand().to_vec();
                 cards.push(card);
-                round_score_for_cards(&cards, player.distinct_number_count() == 6)
+                round_score_for_cards(
+                    &cards,
+                    if player.distinct_number_count() == 6 {
+                        ScoreBonus::FlipSeven
+                    } else {
+                        ScoreBonus::None
+                    },
+                )
             }
         }
         Card::Bonus(BonusCard::Plus(_)) | Card::Bonus(BonusCard::Double) => {
             let mut cards = player.hand().to_vec();
             cards.push(card);
-            round_score_for_cards(&cards, false)
+            round_score_for_cards(&cards, ScoreBonus::None)
         }
-        Card::SecondChance | Card::FlipThree | Card::Freeze => player.round_score(false),
+        Card::SecondChance | Card::FlipThree | Card::Freeze => player.round_score(ScoreBonus::None),
     }
 }

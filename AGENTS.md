@@ -3,10 +3,10 @@
 ## Project Shape
 
 - This is a Rust 2024 native GUI app using `eframe`/`egui`.
-- `src/model/game.rs` owns live game state, scoring, special-card behavior, rounds, undo, selected-card deals, and UI-facing probability calculations.
-- `src/model/strategy.rs` owns AI recommendations, random replay policy, rollout settings, strategy comparison, and offline simulation behavior.
+- `src/model/game/` owns private live game state, typed events/errors, pending resolution, scoring, rounds, undo, selected-card deals, and UI-facing probability calculations.
+- `src/simulation/` owns the feature-gated simulation facade, AI recommendations, random replay policy, and strategy comparison. `config.rs` owns settings and validation, `comparison.rs` owns scheduling and seating, and `report.rs` owns aggregate statistics. Tests are grouped by subject in `src/simulation/tests/`.
 - `src/model/deck.rs`, `src/model/player.rs`, and `src/model/card.rs` own focused deck, player, scoring, and card primitives.
-- `src/app.rs` owns egui rendering, layout, hover/detail panels, diagnostics, and user interaction wiring.
+- `src/app.rs` owns app state, responsive routing, diagnostics, and action handlers. `src/app/desktop.rs` and `mobile.rs` own layouts and panels. `components.rs` owns shared card widgets and player-count controls, `odds.rs` and `scoreboard.rs` own analysis widgets, `presentation.rs` owns copy/formatting, and `theme.rs` owns visual styling.
 - `src/main.rs` should stay minimal and only bootstrap the native eframe app.
 
 ## Separation Of Concerns
@@ -14,7 +14,7 @@
 - Keep game-rule decisions out of UI code. If the UI needs new game data, add or extend model-facing APIs.
 - UI should consume model types such as `GameState`, `DrawOdds`, `DealOutcome`, `PlayerScore`, and card label/chip helpers.
 - Keep rendering helpers focused on display concerns. Avoid duplicating scoring, deck, or special-card logic in egui handlers.
-- Keep AI/strategy/replay decisions out of live game-state APIs. Strategy code may clone game state for replay, but it should own target choice, draw/stay policy, rollout loops, and random card selection.
+- Keep AI/strategy/replay decisions out of live game-state APIs. Simulation code may clone game state for replay, but it should own target choice, draw/stay policy, rollout loops, and random card selection.
 - Keep the native GUI focused on live game operation and model-provided analysis. Do not add offline simulation controls or run strategy rollouts in `src/app.rs` unless explicitly requested.
 
 ## Rust Code Health
@@ -35,7 +35,7 @@
 - Manual selected-card deals must remove one matching card from the current next-draw pool and remain undoable.
 - Undo tracking is part of live gameplay. Replay/simulation code may disable undo history on cloned state, but it must not change live undo semantics.
 - Special-card sequencing should preserve current behavior:
-  - Second Chance is kept or used immediately.
+  - Second Chance is kept or used immediately. A duplicate Second Chance is transferred immediately to an eligible active player, or discarded if no recipient exists.
   - Flip Three and Freeze drawn during Flip Three are queued and resolved after the current sequence.
 
 ## UI Expectations

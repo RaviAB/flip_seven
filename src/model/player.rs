@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use super::{BonusCard, Card};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,6 +23,12 @@ pub enum PlayerStatus {
     Stayed,
     Frozen,
     Busted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreBonus {
+    None,
+    FlipSeven,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,27 +131,26 @@ impl Player {
     pub fn distinct_number_count(&self) -> usize {
         self.hand
             .iter()
-            .filter_map(|card| match card {
-                Card::Number(value) => Some(*value),
-                _ => None,
+            .fold(0_u16, |mask, card| match card {
+                Card::Number(value) => mask | (1 << value),
+                _ => mask,
             })
-            .collect::<HashSet<_>>()
-            .len()
+            .count_ones() as usize
     }
 
     pub fn has_flip_seven(&self) -> bool {
         self.distinct_number_count() >= 7
     }
 
-    pub fn round_score(&self, flip_seven_bonus: bool) -> u32 {
+    pub fn round_score(&self, bonus: ScoreBonus) -> u32 {
         if self.status == PlayerStatus::Busted {
             return 0;
         }
 
-        score_breakdown_for_cards(&self.hand, flip_seven_bonus).total
+        score_breakdown_for_cards(&self.hand, bonus).total
     }
 
-    pub fn score_breakdown(&self, flip_seven_bonus: bool) -> ScoreBreakdown {
+    pub fn score_breakdown(&self, bonus: ScoreBonus) -> ScoreBreakdown {
         if self.status == PlayerStatus::Busted {
             return ScoreBreakdown {
                 number_sum: 0,
@@ -158,15 +161,15 @@ impl Player {
             };
         }
 
-        score_breakdown_for_cards(&self.hand, flip_seven_bonus)
+        score_breakdown_for_cards(&self.hand, bonus)
     }
 }
 
-pub fn round_score_for_cards(cards: &[Card], flip_seven_bonus: bool) -> u32 {
-    score_breakdown_for_cards(cards, flip_seven_bonus).total
+pub fn round_score_for_cards(cards: &[Card], bonus: ScoreBonus) -> u32 {
+    score_breakdown_for_cards(cards, bonus).total
 }
 
-pub fn score_breakdown_for_cards(cards: &[Card], flip_seven_bonus: bool) -> ScoreBreakdown {
+pub fn score_breakdown_for_cards(cards: &[Card], bonus: ScoreBonus) -> ScoreBreakdown {
     let number_sum = cards
         .iter()
         .filter_map(|card| match card {
@@ -189,7 +192,11 @@ pub fn score_breakdown_for_cards(cards: &[Card], flip_seven_bonus: bool) -> Scor
     } else {
         1
     };
-    let flip_seven_bonus = if flip_seven_bonus { 15 } else { 0 };
+    let flip_seven_bonus = if bonus == ScoreBonus::FlipSeven {
+        15
+    } else {
+        0
+    };
     let total = number_sum * multiplier + additive_bonus + flip_seven_bonus;
 
     ScoreBreakdown {

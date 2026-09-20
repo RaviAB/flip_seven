@@ -3,17 +3,19 @@ use rand::rngs::StdRng;
 
 use crate::model::{GameState, PlayerId, SpecialAction};
 
+use super::config::SimulationConfig;
 use super::decision::AiDecision;
 use super::decision::projected_player_value;
-use super::report::SimulationSettings;
 use super::simulator::{
-    SimulatedMatch, apply_simulated_decision, finish_match_with_basic_policy, simulation_clone,
+    SimulatedMatch, SimulationFailure, apply_simulated_decision, finish_match_with_basic_policy,
+    simulation_clone,
 };
 
 #[derive(Debug, Clone, Copy)]
 struct MonteCarloActionStats {
     decision: AiDecision,
     wins: usize,
+    completed_samples: usize,
     utility_sum: f64,
     prior: f64,
 }
@@ -23,6 +25,7 @@ impl MonteCarloActionStats {
         Self {
             decision,
             wins: 0,
+            completed_samples: 0,
             utility_sum: 0.0,
             prior,
         }
@@ -32,8 +35,8 @@ impl MonteCarloActionStats {
         self.utility_sum / samples.max(1) as f64
     }
 
-    fn win_rate(self, samples: usize) -> f64 {
-        self.wins as f64 / samples.max(1) as f64
+    fn win_rate(self) -> f64 {
+        self.wins as f64 / self.completed_samples.max(1) as f64
     }
 
     fn selection_score(self, samples: usize) -> f64 {
@@ -47,16 +50,17 @@ pub(super) struct MonteCarloActionEvaluation {
     pub(super) win_rate: f64,
     pub(super) average_utility: f64,
     pub(super) samples: usize,
+    pub(super) completed_samples: usize,
 }
 
 pub(super) fn evaluate_monte_carlo_actions(
     game: &GameState,
     player_id: PlayerId,
     decisions: &[AiDecision],
-    settings: &SimulationSettings,
-) -> Option<MonteCarloActionEvaluation> {
+    settings: &SimulationConfig,
+) -> Result<Option<MonteCarloActionEvaluation>, SimulationFailure> {
     if decisions.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let samples = settings.decision_rollouts.max(1);
@@ -77,10 +81,11 @@ pub(super) fn evaluate_monte_carlo_actions(
         for (decision_index, decision) in decisions.iter().copied().enumerate() {
             let mut rng = StdRng::seed_from_u64(search_action_seed(sample_seed, decision_index));
             let mut candidate = simulation_clone(game);
-            apply_simulated_decision(&mut candidate, decision, &mut rng);
-            let result = finish_match_with_basic_policy(candidate, settings, &mut rng);
+            apply_simulated_decision(&mut candidate, decision, &mut rng)?;
+            let result = finish_match_with_basic_policy(candidate, settings, &mut rng)?;
             let utility = terminal_search_utility(&result, player_id, settings.target_score);
-            if result.winner == Some(player_id) {
+            stats[decision_index].completed_samples += usize::from(result.winner().is_some());
+            if result.winner() == Some(player_id) {
                 stats[decision_index].wins += 1;
             }
             stats[decision_index].utility_sum += utility;
@@ -95,21 +100,22 @@ pub(super) fn evaluate_monte_carlo_actions(
                     .total_cmp(&right.average_utility(samples))
             })
             .then_with(|| left.prior.total_cmp(&right.prior))
-    })?;
+    });
 
-    Some(MonteCarloActionEvaluation {
+    Ok(best.map(|best| MonteCarloActionEvaluation {
         decision: best.decision,
-        win_rate: best.win_rate(samples),
+        win_rate: best.win_rate(),
         average_utility: best.average_utility(samples),
         samples,
-    })
+        completed_samples: best.completed_samples,
+    }))
 }
 
 fn tactical_decision_prior(
     game: &GameState,
     player_id: PlayerId,
     decision: AiDecision,
-    settings: &SimulationSettings,
+    settings: &SimulationConfig,
 ) -> f64 {
     match decision {
         AiDecision::Stay => game
@@ -164,9 +170,10 @@ fn terminal_search_utility(result: &SimulatedMatch, player_id: PlayerId, target_
         .map(|score| score.total_score)
         .max()
         .unwrap_or(0);
-    let win_value = f64::from(result.winner == Some(player_id));
+    let win_value = f64::from(result.winner() == Some(player_id));
     let score_margin = (own_score as f64 - best_other_score as f64) / target_score.max(1) as f64;
 
+    // A cutoff contributes only heuristic score margin, never a synthetic win.
     win_value + 0.12 * score_margin.clamp(-1.0, 1.0)
 }
 

@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum StrategyKind {
     Conservative,
     Balanced,
@@ -32,55 +33,53 @@ impl FromStr for StrategyKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlayerController {
-    Human,
-    Ai(StrategyKind),
-}
-
-pub fn strategy_label(strategy: StrategyKind) -> String {
-    match strategy {
-        StrategyKind::Conservative => "Conservative".to_owned(),
-        StrategyKind::Balanced => "Balanced".to_owned(),
-        StrategyKind::Aggressive => "Aggressive".to_owned(),
-        StrategyKind::MaxRoundEv => "MaxRoundEV".to_owned(),
-        StrategyKind::MaxWinProbability => "MaxWin%".to_owned(),
-        StrategyKind::MaxWinStatic => "MaxWinStatic".to_owned(),
-        StrategyKind::StayAtNumberCount(threshold) => format!("Stay{threshold}Cards"),
-        StrategyKind::StayAtScore(threshold) => format!("Stay{threshold}"),
+impl StrategyKind {
+    pub fn label(self) -> String {
+        let strategy = self;
+        match strategy {
+            StrategyKind::Conservative => "Conservative".to_owned(),
+            StrategyKind::Balanced => "Balanced".to_owned(),
+            StrategyKind::Aggressive => "Aggressive".to_owned(),
+            StrategyKind::MaxRoundEv => "MaxRoundEV".to_owned(),
+            StrategyKind::MaxWinProbability => "MaxWin%".to_owned(),
+            StrategyKind::MaxWinStatic => "MaxWinStatic".to_owned(),
+            StrategyKind::StayAtNumberCount(threshold) => format!("Stay{threshold}Cards"),
+            StrategyKind::StayAtScore(threshold) => format!("Stay{threshold}"),
+        }
     }
-}
 
-pub fn strategy_slug(strategy: StrategyKind) -> String {
-    match strategy {
-        StrategyKind::Conservative => "conservative".to_owned(),
-        StrategyKind::Balanced => "balanced".to_owned(),
-        StrategyKind::Aggressive => "aggressive".to_owned(),
-        StrategyKind::MaxRoundEv => "max-round-ev".to_owned(),
-        StrategyKind::MaxWinProbability => "max-win-probability".to_owned(),
-        StrategyKind::MaxWinStatic => "max-win-static".to_owned(),
-        StrategyKind::StayAtNumberCount(threshold) => format!("stay-at-{threshold}-cards"),
-        StrategyKind::StayAtScore(threshold) => format!("stay-at-{threshold}"),
+    pub fn slug(self) -> String {
+        let strategy = self;
+        match strategy {
+            StrategyKind::Conservative => "conservative".to_owned(),
+            StrategyKind::Balanced => "balanced".to_owned(),
+            StrategyKind::Aggressive => "aggressive".to_owned(),
+            StrategyKind::MaxRoundEv => "max-round-ev".to_owned(),
+            StrategyKind::MaxWinProbability => "max-win-probability".to_owned(),
+            StrategyKind::MaxWinStatic => "max-win-static".to_owned(),
+            StrategyKind::StayAtNumberCount(threshold) => format!("stay-at-{threshold}-cards"),
+            StrategyKind::StayAtScore(threshold) => format!("stay-at-{threshold}"),
+        }
     }
-}
 
-pub fn all_strategy_kinds() -> Vec<StrategyKind> {
-    let mut strategies = vec![
-        StrategyKind::Conservative,
-        StrategyKind::Balanced,
-        StrategyKind::Aggressive,
-        StrategyKind::MaxRoundEv,
-        StrategyKind::MaxWinProbability,
-        StrategyKind::MaxWinStatic,
-        StrategyKind::StayAtNumberCount(3),
-        StrategyKind::StayAtNumberCount(4),
-    ];
-    strategies.extend((15..=35).map(StrategyKind::StayAtScore));
-    strategies
-}
+    pub fn catalog() -> Vec<StrategyKind> {
+        let mut strategies = vec![
+            StrategyKind::Conservative,
+            StrategyKind::Balanced,
+            StrategyKind::Aggressive,
+            StrategyKind::MaxRoundEv,
+            StrategyKind::MaxWinProbability,
+            StrategyKind::MaxWinStatic,
+            StrategyKind::StayAtNumberCount(3),
+            StrategyKind::StayAtNumberCount(4),
+        ];
+        strategies.extend((15..=35).map(StrategyKind::StayAtScore));
+        strategies
+    }
 
-pub fn human_sweep_strategy_kinds() -> Vec<StrategyKind> {
-    all_strategy_kinds()
+    pub fn human_sweep_catalog() -> Vec<StrategyKind> {
+        Self::catalog()
+    }
 }
 
 fn normalize_strategy_name(value: &str) -> String {
@@ -123,7 +122,7 @@ pub(super) fn unique_strategies(strategies: &[StrategyKind]) -> Vec<StrategyKind
 }
 
 pub(super) fn strategy_sort_key(strategy: StrategyKind) -> usize {
-    all_strategy_kinds()
+    StrategyKind::catalog()
         .iter()
         .position(|candidate| *candidate == strategy)
         .unwrap_or(usize::MAX)

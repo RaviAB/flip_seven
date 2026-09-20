@@ -1,4 +1,4 @@
-use crate::app::FlipSevenApp;
+use crate::FlipSevenApp;
 
 pub fn start() {
     use wasm_bindgen::JsCast;

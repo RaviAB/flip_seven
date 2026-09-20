@@ -1,5 +1,5 @@
 #[cfg(not(target_arch = "wasm32"))]
-use flip_seven::app::FlipSevenApp;
+use flip_seven::FlipSevenApp;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
@@ -19,5 +19,5 @@ fn main() -> eframe::Result<()> {
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
-    flip_seven::web::start();
+    flip_seven::start();
 }
